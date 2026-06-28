@@ -1,0 +1,6 @@
+# Copy to ~/.uoa-mail-creds and chmod 600.
+# Line 1: username (without @uoa.gr)
+# Line 2: password
+# Line 3: optional separate SMTP password (defaults to line 2)
+YOUR_USERNAME
+YOUR_PASSWORD

@@ -1,0 +1,34 @@
+# ── Never commit secrets or personal data ───────────────────────────────────
+# Credentials live outside the repo entirely (~/.uoa-mail-creds etc.), but
+# these patterns are here as a second line of defence.
+*creds*
+*.creds
+!examples/*creds*.example
+.env
+*secret*
+*password*
+config.ini            # local config holds your email address
+!examples/config.ini.example
+
+# Runtime state: ledgers hold real subjects, senders and message ids.
+*-seen.json
+web-hashes.json
+notifications.log
+state/
+logs/
+
+# Watch list can contain private URLs
+.watch-urls
+!examples/watch-urls.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

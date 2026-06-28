@@ -1,0 +1,6 @@
+# Copy to ~/.eudoxus-creds and chmod 600.
+# Optional: without it, Eudoxus public pages are still monitored.
+# Line 1: username
+# Line 2: password
+YOUR_USERNAME
+YOUR_PASSWORD

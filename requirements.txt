@@ -1,0 +1,3 @@
+# Python dependencies. Everything else the system uses is in the stdlib.
+requests>=2.25
+beautifulsoup4>=4.9

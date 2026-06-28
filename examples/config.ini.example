@@ -1,0 +1,32 @@
+# Copy to ~/.config/check-uoa-mail/config.ini and edit.
+# Everything here is optional except [notify] recipient.
+
+[notify]
+# Where every notification is forwarded. Required.
+# Can also be supplied as the UOA_RECIPIENT environment variable.
+recipient = you@example.com
+
+[imap]
+host = mail.uoa.gr
+port = 993
+mailbox = INBOX
+timeout = 20
+
+[smtp]
+# mail.uoa.gr refuses submission; smtp.uoa.gr accepts it.
+host = smtp.uoa.gr
+port = 465
+mode = ssl
+# Leave blank to use "<username>@uoa.gr" from your credentials file.
+from =
+timeout = 25
+
+[deadlines]
+urgent_days = 3
+week_days = 7
+horizon_days = 365
+
+[eclass]
+base = https://eclass.uoa.gr
+sso = https://sso.uoa.gr
+timeout = 30
