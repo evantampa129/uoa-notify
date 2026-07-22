@@ -1,0 +1,41 @@
+# ── UoA academic notification system ────────────────────────────────────────
+# Runs every day, Monday to Sunday.
+#
+# Install with:  ./install.sh --cron        (substitutes paths for you)
+# Or edit the PATH below to your real home directory and: crontab this-file
+#
+# NOTE: cron does NOT expand variables in assignment lines, so PATH must be
+# a literal absolute path. $HOME inside a *command* is fine — commands run
+# through SHELL, which does expand it.
+SHELL=/bin/bash
+PATH=/home/YOUR_USER/.local/bin:/home/YOUR_USER/bin:/usr/local/bin:/usr/bin:/bin
+MAILTO=""
+UOA_LOG=/home/YOUR_USER/.local/log/notifications.log
+
+# Gmail is the source of truth for read/unread — sync first, on the quarter
+# hour, so the checkers that follow re-notify only what is genuinely unread.
+*/15 * * * *      $HOME/bin/sync-read-status.py --quiet >/dev/null 2>>$UOA_LOG
+
+# UoA webmail — every 15 minutes, offset from the sync above.
+5-59/15 * * * *   $HOME/bin/check-uoa-mail.py --notify >/dev/null 2>>$UOA_LOG
+
+# eClass — every 30 minutes.
+8,38 * * * *      $HOME/bin/check-eclass.py --notify >/dev/null 2>>$UOA_LOG
+
+# University mail already in Gmail — every 30 minutes.
+12,42 * * * *     $HOME/bin/check-gmail-university.py --notify >/dev/null 2>>$UOA_LOG
+
+# Eudoxus — every 2 hours.
+20 */2 * * *      $HOME/bin/check-eudoxus.py --notify >/dev/null 2>>$UOA_LOG
+
+# Department website — every 2 hours.
+35 */2 * * *      $HOME/bin/check-department.py --notify >/dev/null 2>>$UOA_LOG
+
+# Morning brief — 07:30 every day, Monday to Sunday.
+30 7 * * *        $HOME/bin/morning-brief.sh >/dev/null 2>>$UOA_LOG
+
+# Daily log into the Obsidian vault — 22:00 every day.
+0 22 * * *        $HOME/bin/daily-log.sh >/dev/null 2>>$UOA_LOG
+
+# Weekly review — Sundays at 18:00, in addition to that morning's brief.
+0 18 * * 0        $HOME/bin/weekly-review.sh >/dev/null 2>>$UOA_LOG
