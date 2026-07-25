@@ -1,0 +1,62 @@
+# Continuous integration.
+#
+# The scripts run unattended from cron, so a syntax error surfaces at 07:30 as
+# a brief that never arrives rather than as a visible failure. These checks are
+# here to catch that at push time instead.
+#
+# Nothing here touches the network, credentials or a real mailbox: the tests
+# cover pure text handling only, so the workflow needs no secrets.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:      # allows running it by hand from the Actions tab
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.8 is the documented floor; 3.12 is what the scripts run on locally.
+        python-version: ["3.8", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # No pip install step: uoa_common imports only the standard library at
+      # module level, and the tests exercise that module alone. requests and
+      # beautifulsoup4 are imported lazily inside the functions that fetch web
+      # pages, which these tests never reach.
+      - name: Run tests
+        run: python -m unittest discover -s tests -t tests -v
+
+      # Catches syntax errors without executing anything, so the checkers'
+      # third-party imports do not need to be installed.
+      - name: Byte-compile every Python script
+        run: python -m py_compile bin/*.py
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse every shell script
+        run: |
+          for f in bin/*.sh install.sh; do
+            bash -n "$f" || exit 1
+          done
+
+      # Advisory for now. Restricted to error severity so only genuine faults
+      # are reported, and non-blocking because the existing warnings have not
+      # been triaged yet. Drop continue-on-error once they have.
+      - name: Lint shell scripts
+        continue-on-error: true
+        run: shellcheck -S error bin/*.sh install.sh
