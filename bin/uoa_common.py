@@ -23,6 +23,12 @@ from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
 
 CREDS_PATH = os.path.expanduser("~/.uoa-mail-creds")
+EUDOXUS_CREDS_PATH = os.path.expanduser("~/.eudoxus-creds")
+
+# Preferred home for credentials: one directory, mode 700, holding either
+# GPG-encrypted or plain files. The legacy dotfiles above are still read when
+# nothing is stored here, so an existing install keeps working untouched.
+CREDS_DIR = os.path.expanduser("~/.local/share/uoa-notify/credentials")
 CONFIG_PATH = os.path.expanduser("~/.config/check-uoa-mail/config.ini")
 STATE_DIR = os.path.expanduser("~/.local/state")
 LOG_PATH = os.path.expanduser("~/.local/log/notifications.log")
@@ -38,6 +44,12 @@ DEFAULTS = {
     "deadlines": {"urgent_days": "3", "week_days": "7", "horizon_days": "365"},
     "eclass": {"base": "https://eclass.uoa.gr", "sso": "https://sso.uoa.gr",
                "timeout": "30"},
+    # Which assistant CLI drives the MCP connectors, and how that vendor
+    # namespaces its tool ids. Deliberately empty so no vendor name ships in
+    # the source: set them in the local config or export UOA_AGENT_CLI /
+    # UOA_MCP_PREFIX. With both unset every MCP-backed step is skipped and
+    # the rest of the system runs unchanged.
+    "agent": {"cli": "", "mcp_prefix": "", "timeout": "180"},
 }
 
 SECRETARY_HINTS = ("secretar", "γραμματ", "grammat")
@@ -65,7 +77,7 @@ GRADE_KEYWORDS = ["βαθμολογια", "βαθμος", "βαθμοι", "βα�
 
 # Phrases that merely *contain* a deadline word without being one. Blanked out
 # before matching so e.g. "σταθμό εργασίας" (workstation) in an automated NOC
-# notice cannot turn a routine message into a 🔴 urgent deadline.
+# notice cannot turn a routine message into an urgent deadline.
 NOISE_PHRASES = [
     "σταθμο εργασιας", "σταθμος εργασιας", "σταθμου εργασιας",
     "σταθμων εργασιας", "περιβαλλον εργασιας", "χωρο εργασιας",
@@ -138,6 +150,9 @@ ENGLISH_MONTHS = {
     "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12,
 }
 
+# Kept deliberately: these three are the priority signal itself, not
+# decoration. They survive a subject line truncated on a phone screen,
+# where the words after them do not.
 BUCKET_ICON = {"urgent": "🔴", "week": "🟡", "info": "🟢"}
 BUCKET_LABEL = {
     "urgent": "Urgent (deadlines within 3 days)",
@@ -180,30 +195,199 @@ def load_config():
     return cfg
 
 
-def read_credentials(tool="creds", path=CREDS_PATH):
-    """Return (username, password, smtp_password). Line 3 is an optional
-    separate SMTP password."""
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            lines = [ln.strip() for ln in fh.read().splitlines()]
-    except FileNotFoundError:
-        die(tool, f"credentials file {path} not found; line 1 username, "
-                  f"line 2 password, then chmod 600")
-    except PermissionError:
-        die(tool, f"cannot read {path} (permission denied)")
-    except OSError as exc:
-        die(tool, f"cannot read {path}: {exc}")
+# ------------------------------------------------------------- credentials
+#
+# Credentials are read through three backends, tried in this order. All of
+# them are optional: with none set up the system behaves exactly as it always
+# has, reading the plain mode-600 dotfile.
+#
+#   1. a KeePassXC database (KDBX4, AES-256 + Argon2) under CREDS_DIR, read
+#      with keepassxc-cli. Unlocked by a key file rather than a passphrase so
+#      cron can open it unattended, and the same database can be opened in
+#      the KeePassXC desktop app. Preferred when keepassxc-cli is installed.
+#   2. the login keyring, via `secret-tool` (package: libsecret-tools).
+#      Encrypted at rest, unlocked once by the login password, and readable
+#      by cron jobs running in the same desktop session.
+#   3. a GPG-encrypted file under CREDS_DIR, decrypted through gpg-agent.
+#      Unattended runs succeed while the agent still holds the passphrase; an
+#      expired cache degrades to a warning and the next backend, never to a
+#      crash in the middle of a cron cycle.
+#   4. a plain file with mode 600, looked for in CREDS_DIR first and then at
+#      the legacy path in the home directory.
+#
+# Worth stating the limit plainly, because encryption invites the wrong
+# assumption: whatever an unattended cron job can decrypt without a human
+# present, an attacker who already controls this account can decrypt too.
+# What these backends actually buy is protection against the realistic
+# accidents -- a dotfile swept into a backup, a synchronised home directory,
+# a repository committed by mistake, a stray chmod that widens the mode --
+# and not against a local attacker who is already you.
 
-    lines = [ln for ln in lines if ln and not ln.startswith("#")]
+# Legacy path -> short name used for the keyring entry and the file in
+# CREDS_DIR, so both backends address the same secret by the same name.
+CRED_NAMES = {CREDS_PATH: "uoa-mail", EUDOXUS_CREDS_PATH: "eudoxus"}
+KEYRING_SERVICE = "uoa-notify"
+
+
+def credentials_dir():
+    """CREDS_DIR, created mode 700 on first use. Returns None if unusable."""
+    try:
+        os.makedirs(CREDS_DIR, mode=0o700, exist_ok=True)
+        os.chmod(CREDS_DIR, 0o700)
+        return CREDS_DIR
+    except OSError:
+        return None
+
+
+def _run_quiet(cmd, timeout=20):
+    """Run a helper binary, returning stdout or None. Never raises."""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+KDBX_PATH = os.path.join(CREDS_DIR, "uoa-notify.kdbx")
+KDBX_KEYFILE = os.path.join(CREDS_DIR, "uoa-notify.keyfile")
+
+
+def _from_keepassxc(name, tool):
+    """Read one entry's UserName and Password out of the KDBX database.
+
+    -a UserName -a Password prints exactly those two attributes, one per
+    line, in that order -- which is already the two-line format every caller
+    expects, so no parsing is needed. --no-password with a key file is what
+    makes this work from cron with nobody at the keyboard.
+    """
+    from shutil import which
+    if not which("keepassxc-cli"):
+        return None
+    if not (os.path.exists(KDBX_PATH) and os.path.exists(KDBX_KEYFILE)):
+        return None
+    out = _run_quiet(["keepassxc-cli", "show", "--quiet", "--show-protected",
+                      "--key-file", KDBX_KEYFILE, "--no-password",
+                      "-a", "UserName", "-a", "Password",
+                      KDBX_PATH, name], timeout=30)
+    if out and len(out.strip().splitlines()) >= 2:
+        log(tool, "info", f"credentials for {name} read from {KDBX_PATH}")
+        return out
+    if out is None:
+        log(tool, "warn", f"keepassxc-cli could not open {KDBX_PATH}")
+    return None
+
+
+def _from_keyring(name, tool):
+    """Secret stored as one blob under service=uoa-notify, account=<name>."""
+    from shutil import which
+    if not which("secret-tool"):
+        return None
+    out = _run_quiet(["secret-tool", "lookup",
+                      "service", KEYRING_SERVICE, "account", name])
+    if out:
+        log(tool, "info", f"credentials for {name} read from the login keyring")
+        return out
+    return None
+
+
+def _from_gpg(name, tool):
+    """Decrypt CREDS_DIR/<name>.gpg with the user's gpg-agent."""
+    from shutil import which
+    path = os.path.join(CREDS_DIR, name + ".gpg")
+    if not os.path.exists(path):
+        return None
+    if not which("gpg"):
+        log(tool, "warn", f"{path} exists but gpg is not installed")
+        return None
+    # --batch keeps gpg from trying to prompt on a terminal cron does not
+    # have; if the agent has no cached passphrase this fails cleanly and the
+    # caller falls through to the next backend.
+    out = _run_quiet(["gpg", "--quiet", "--batch", "--decrypt", path], timeout=30)
+    if out:
+        log(tool, "info", f"credentials for {name} decrypted from {path}")
+        return out
+    log(tool, "warn", f"cannot decrypt {path} (locked agent or wrong key)")
+    return None
+
+
+def _from_file(name, legacy_path, tool):
+    """Plain file: CREDS_DIR/<name> first, then the legacy dotfile."""
+    for path in (os.path.join(CREDS_DIR, name), legacy_path):
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError as exc:
+            log(tool, "warn", f"cannot read {path}: {exc}")
+            continue
+        try:
+            mode = os.stat(path).st_mode & 0o777
+            if mode & 0o077:
+                log(tool, "warn",
+                    f"{path} is mode {mode:o} and readable by others; "
+                    f"run 'chmod 600 {path}'")
+        except OSError:
+            pass
+        return text
+    return None
+
+
+def credential_lines(name, legacy_path, tool="creds"):
+    """Return the secret's non-comment lines, or None if it is not stored.
+
+    Backends are tried strongest first and every one of them is allowed to
+    fail quietly, so a locked keyring or an expired gpg-agent falls back
+    instead of taking the whole cron cycle down with it.
+    """
+    for backend in (_from_keepassxc, _from_keyring, _from_gpg):
+        text = backend(name, tool)
+        if text:
+            break
+    else:
+        text = _from_file(name, legacy_path, tool)
+    if not text:
+        return None
+    lines = [ln.strip() for ln in text.splitlines()]
+    return [ln for ln in lines if ln and not ln.startswith("#")]
+
+
+def read_credentials(tool="creds", path=CREDS_PATH):
+    """Return (username, password, smtp_password).
+
+    Line 1 is the username, line 2 the password and line 3 an optional
+    separate SMTP password. Fatal when nothing is stored: every caller needs
+    these to do anything at all.
+    """
+    name = CRED_NAMES.get(path, os.path.basename(path).lstrip("."))
+    lines = credential_lines(name, path, tool)
+    if lines is None:
+        die(tool, f"no credentials for '{name}'. Store them with "
+                  f"bin/uoa-credentials.sh store {name}, or write {path} "
+                  f"with the username on line 1 and the password on line 2 "
+                  f"and chmod 600 it")
     if len(lines) < 2:
-        die(tool, f"{path} needs username on line 1 and password on line 2")
+        die(tool, f"credentials for '{name}' need a username on line 1 "
+                  f"and a password on line 2")
     user, password = lines[0], lines[1]
     if user.startswith("YOUR_") or password.startswith("YOUR_"):
-        die(tool, f"{path} still holds placeholder values")
-    mode = os.stat(path).st_mode & 0o777
-    if mode & 0o077:
-        log(tool, "warn", f"{path} is mode {mode:o}; run 'chmod 600 {path}'")
+        die(tool, f"credentials for '{name}' still hold placeholder values")
     return user, password, (lines[2] if len(lines) > 2 else password)
+
+
+def read_optional_credentials(path, tool="creds"):
+    """Same as read_credentials but returns None instead of exiting.
+
+    Used for Eudoxus, which the specification requires to be skipped
+    gracefully rather than to be a hard dependency.
+    """
+    name = CRED_NAMES.get(path, os.path.basename(path).lstrip("."))
+    lines = credential_lines(name, path, tool)
+    if not lines or len(lines) < 2:
+        return None
+    if lines[0].startswith("YOUR_") or lines[1].startswith("YOUR_"):
+        return None
+    return lines[0], lines[1]
 
 
 # -------------------------------------------------------------------- state
@@ -397,14 +581,20 @@ NOTIFY_OPEN = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 
 def notify_send(title, body, urgency="normal", tool="notify", url="",
-                icon="mail-unread"):
-    """Desktop notification. With `url`, hand off to notify-open.sh so that
-    clicking the notification opens the source page; that helper blocks
-    waiting for the click, so it is detached and never joined."""
+                icon="mail-unread", tag="", source="", message_id=""):
+    """Desktop notification.
+
+    With a `url` or an identified item, hand off to notify-open.sh: that
+    helper is what makes the notification body clickable, opens the source
+    page and marks the item read afterwards. It blocks waiting for the click,
+    so it is detached and never joined — this function returns as soon as the
+    helper is running, not when the user answers.
+    """
     env = desktop_env()
-    if url and os.access(NOTIFY_OPEN, os.X_OK):
+    if (url or tag or message_id) and os.access(NOTIFY_OPEN, os.X_OK):
         try:
-            subprocess.Popen([NOTIFY_OPEN, title, body, urgency, url],
+            subprocess.Popen([NOTIFY_OPEN, title, body, urgency, url,
+                              tag or "", source or "", message_id or ""],
                              env=env, stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL,
@@ -604,33 +794,90 @@ def parse_greek_stamp(text, today=None):
 
 
 # -------------------------------------------------------------- mcp bridge
+#
+# Gmail, Google Calendar, Google Drive and Trello are not reached with their
+# own API clients and their own OAuth dance. They are reached over MCP, by
+# handing a single-shot prompt to an assistant CLI that already holds the
+# grants for those accounts. That keeps this repository free of a second set
+# of tokens to store and refresh.
+#
+# Which CLI, and the prefix its connector tool ids carry, are configuration
+# rather than constants -- see the [agent] section in DEFAULTS above. Nothing
+# here depends on a particular vendor, and nothing here fails when the CLI is
+# absent: every call returns None and every caller treats None as "skip this
+# section", which is also what happens offline.
 
 MCP_TIMEOUT = 180
 
 
-def mcp_available():
-    """True if the claude CLI is on PATH (cron needs ~/.local/bin)."""
+def agent_cli(cfg=None):
+    """Name of the assistant CLI, or "" when none is configured."""
+    env = os.environ.get("UOA_AGENT_CLI", "").strip()
+    if env:
+        return env
+    cfg = cfg or load_config()
+    return cfg.get("agent", "cli", fallback="").strip()
+
+
+def mcp_prefix(cfg=None):
+    """Prefix shared by this vendor's MCP tool ids, e.g. "mcp_vendor_"."""
+    env = os.environ.get("UOA_MCP_PREFIX", "").strip()
+    if env:
+        return env
+    cfg = cfg or load_config()
+    return cfg.get("agent", "mcp_prefix", fallback="").strip()
+
+
+def mcp_tools(service, names, cfg=None):
+    """Fully-qualified tool ids for one connector.
+
+    `service` is the connector name as the vendor spells it (Gmail,
+    Trello, ...) and `names` the bare tool names. Returns [] when no prefix
+    is configured, which mcp_ask reads as "no MCP available".
+    """
+    prefix = mcp_prefix(cfg)
+    return [f"{prefix}{service}__{n}" for n in names] if prefix else []
+
+
+def mcp_available(cfg=None):
+    """True if a CLI is configured and actually on PATH.
+
+    Checked on every call rather than cached: cron starts with a minimal PATH
+    and the CLI usually lives in ~/.local/bin.
+    """
     from shutil import which
-    return which("claude") is not None
+    cli = agent_cli(cfg)
+    return bool(cli) and which(cli) is not None
 
 
 def mcp_ask(prompt, tools, timeout=MCP_TIMEOUT, tool="mcp"):
-    """Run a headless `claude -p` turn restricted to the given MCP tools.
+    """Run one headless assistant turn restricted to the given MCP tools.
 
-    Returns stdout text, or None if the CLI is missing, times out, or fails.
-    Every caller must treat None as 'skip this section' so the scripts keep
-    working offline."""
-    if not mcp_available():
-        log(tool, "warn", "claude CLI not on PATH — skipping MCP step")
+    Returns stdout text, or None if no CLI is configured, the CLI is missing,
+    the tool list is empty, or the call fails or times out. Every caller must
+    treat None as "skip this section" so the scripts keep working offline.
+    """
+    cfg = load_config()
+    cli = agent_cli(cfg)
+    if not cli:
+        log(tool, "warn", "no assistant CLI configured ([agent] cli) — "
+                          "skipping MCP step")
         return None
-    cmd = ["claude", "-p", prompt, "--allowedTools", ",".join(tools)]
+    if not tools:
+        log(tool, "warn", "no MCP tool prefix configured ([agent] mcp_prefix) "
+                          "— skipping MCP step")
+        return None
+    if not mcp_available(cfg):
+        log(tool, "warn", f"assistant CLI '{cli}' not on PATH — skipping MCP step")
+        return None
+    cmd = [cli, "-p", prompt, "--allowedTools", ",".join(tools)]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         log(tool, "warn", f"MCP call timed out after {timeout}s")
         return None
     except OSError as exc:
-        log(tool, "warn", f"cannot run claude CLI: {exc}")
+        log(tool, "warn", f"cannot run assistant CLI '{cli}': {exc}")
         return None
     if r.returncode != 0:
         log(tool, "warn", f"MCP call failed (rc={r.returncode}): "
@@ -639,9 +886,12 @@ def mcp_ask(prompt, tools, timeout=MCP_TIMEOUT, tool="mcp"):
     return (r.stdout or "").strip()
 
 
-CAL_TOOLS = ["mcp__claude_ai_Google_Calendar__create_event",
-             "mcp__claude_ai_Google_Calendar__list_events",
-             "mcp__claude_ai_Google_Calendar__list_calendars"]
+# Connector tool names, kept bare so the vendor prefix stays configuration.
+CAL_TOOL_NAMES = ["create_event", "list_events", "list_calendars"]
+
+
+def cal_tools():
+    return mcp_tools("Google_Calendar", CAL_TOOL_NAMES)
 
 
 def calendar_add_deadline(title, due_date, due_time=None, description="",
@@ -671,7 +921,7 @@ def calendar_add_deadline(title, due_date, due_time=None, description="",
         print(f"--- DRY RUN calendar: {title} on {due_date} "
               f"(+reminders {r3}, {r1}) ---")
         return True
-    out = mcp_ask(prompt, CAL_TOOLS, tool=tool)
+    out = mcp_ask(prompt, cal_tools(), tool=tool)
     if out is None:
         return False
     ok = "DONE" in out.upper() or "created" in out.lower()
@@ -757,30 +1007,30 @@ SOURCE_LABEL = {"webmail": "UoA", "eclass": "eClass", "eudoxus": "Eudoxus",
 PREFIXES = {
     ("webmail", "urgent"):    "🔴 UoA URGENT:",
     ("webmail", "deadline"):  "🟡 UoA DEADLINE:",
-    ("webmail", "grade"):     "📝 UoA GRADE:",
-    ("webmail", "file"):      "📎 UoA FILE:",
-    ("webmail", "info"):      "📧 UoA:",
+    ("webmail", "grade"):     "UoA GRADE:",
+    ("webmail", "file"):      "UoA FILE:",
+    ("webmail", "info"):      "UoA:",
     ("eclass", "grade"):      "🔴 eClass GRADE:",
     ("eclass", "urgent"):     "🔴 eClass DEADLINE:",
     ("eclass", "deadline"):   "🔴 eClass DEADLINE:",
-    ("eclass", "file"):       "📎 eClass FILE:",
-    ("eclass", "info"):       "📢 eClass:",
+    ("eclass", "file"):       "eClass FILE:",
+    ("eclass", "info"):       "eClass:",
     ("eudoxus", "urgent"):    "🔴 Eudoxus DEADLINE:",
     ("eudoxus", "deadline"):  "🔴 Eudoxus DEADLINE:",
-    ("eudoxus", "info"):      "📚 Eudoxus:",
-    ("department", "urgent"): "🏛️ DI.UoA:",
-    ("department", "deadline"): "🏛️ DI.UoA:",
-    ("department", "info"):   "🏛️ DI.UoA:",
+    ("eudoxus", "info"):      "Eudoxus:",
+    ("department", "urgent"): "🔴 DI.UoA:",
+    ("department", "deadline"): "🟡 DI.UoA:",
+    ("department", "info"):   "DI.UoA:",
     ("gmail", "urgent"):      "🔴 Gmail UNI URGENT:",
     ("gmail", "deadline"):    "🟡 Gmail UNI:",
-    ("gmail", "info"):        "📧 Gmail UNI:",
+    ("gmail", "info"):        "Gmail UNI:",
 }
 
 
 def forward_prefix(source, category):
     return (PREFIXES.get((source, category))
             or PREFIXES.get((source, "info"))
-            or f"📧 {SOURCE_LABEL.get(source, source)}:")
+            or f"{SOURCE_LABEL.get(source, source)}:")
 
 
 def category_for(item):
@@ -946,23 +1196,28 @@ def mcp_json(prompt, tools, timeout=MCP_TIMEOUT, tool="mcp", default=None):
         return default
 
 
-GMAIL_READ_TOOLS = ["mcp__claude_ai_Gmail__search_threads",
-                    "mcp__claude_ai_Gmail__get_thread",
-                    "mcp__claude_ai_Gmail__get_message"]
-DRIVE_TOOLS = ["mcp__claude_ai_Google_Drive__create_file",
-               "mcp__claude_ai_Google_Drive__search_files",
-               "mcp__claude_ai_Google_Drive__update_file"]
-TRELLO_TOOLS = ["mcp__claude_ai_Trello__trelloSearch",
-                "mcp__claude_ai_Trello__trelloReadBoard",
-                "mcp__claude_ai_Trello__trelloReadList",
-                "mcp__claude_ai_Trello__trelloWriteCard",
-                "mcp__claude_ai_Trello__trelloReadMember"]
+GMAIL_READ_NAMES = ["search_threads", "get_thread", "get_message"]
+DRIVE_NAMES = ["create_file", "search_files", "update_file"]
+TRELLO_NAMES = ["trelloSearch", "trelloReadBoard", "trelloReadList",
+                "trelloWriteCard", "trelloReadMember"]
+
+
+def gmail_read_tools():
+    return mcp_tools("Gmail", GMAIL_READ_NAMES)
+
+
+def drive_tools():
+    return mcp_tools("Google_Drive", DRIVE_NAMES)
+
+
+def trello_tools():
+    return mcp_tools("Trello", TRELLO_NAMES)
 
 
 # ------------------------------------------------- message tags & gmail ids
 #
 # Every forwarded notification carries a stable tag in its subject, e.g.
-#     🟡 UoA DEADLINE: Εργασία 3 [UOA-MSG-3f8a1c9d]
+#     UoA DEADLINE: Εργασία 3 [UOA-MSG-3f8a1c9d]
 # The tag is a pure function of (source, message_id), so the same item always
 # produces the same tag — re-runs, re-sends and sync all agree on it.
 # sync-read-status.py searches Gmail for these tags to learn what has been
@@ -1011,7 +1266,7 @@ def gmail_scan_tags(days=45, tool="gmail-sync"):
     None when Gmail could not be reached at all — callers must treat None as
     'leave read state untouched' rather than 'nothing is read'.
     """
-    rows = mcp_json(GMAIL_TAG_PROMPT.format(days=days), GMAIL_READ_TOOLS,
+    rows = mcp_json(GMAIL_TAG_PROMPT.format(days=days), gmail_read_tools(),
                     tool=tool, default=None)
     if rows is None:
         return None
@@ -1100,8 +1355,9 @@ def source_link(source, url=""):
 # label back on. From then on Gmail's own read state is authoritative and
 # genuinely reflects opening the mail on the phone or the laptop.
 
-GMAIL_WRITE_TOOLS = GMAIL_READ_TOOLS + [
-    "mcp__claude_ai_Gmail__update_message_labels"]
+def gmail_write_tools():
+    """Read tools plus the one that changes labels — nothing wider."""
+    return mcp_tools("Gmail", GMAIL_READ_NAMES + ["update_message_labels"])
 
 # Only force UNREAD on a message we forwarded this recently, so a mail the
 # user has genuinely already opened is never dragged back to unread.
@@ -1122,6 +1378,53 @@ def recently_forwarded(entry, minutes=FORCE_UNREAD_WINDOW_MIN):
     return 0 <= age <= minutes
 
 
+def gmail_mark_read(msg_ids, tool="gmail-sync"):
+    """Remove the UNREAD label — the counterpart of gmail_force_unread.
+
+    Called when the item is opened from the desktop notification. Gmail is
+    the declared source of truth for read state, so a local "read" that is
+    never pushed here would simply be overwritten by the next sync run; this
+    is what makes clicking a notification stick across every device.
+
+    Returns the number reported updated; 0 when Gmail is unreachable, which
+    the caller records as a pending push and retries later. Never raises.
+    """
+    ids = [m for m in dict.fromkeys(msg_ids) if m]
+    if not ids:
+        return 0
+    listing = "\n".join(f"  - {m}" for m in ids)
+    prompt = (
+        "For each of these Gmail message ids, remove the UNREAD label so the "
+        "message shows as read. Do not add or remove any other label and do "
+        "not change anything else.\n"
+        f"{listing}\n\n"
+        "Reply with the single word DONE followed by how many you updated."
+    )
+    out = mcp_ask(prompt, gmail_write_tools(), tool=tool)
+    if out is None:
+        log(tool, "warn", f"could not mark {len(ids)} message(s) read")
+        return 0
+    ok = "DONE" in out.upper()
+    log(tool, "info" if ok else "warn",
+        f"marked {len(ids)} message(s) read: {out[:150]}")
+    return len(ids) if ok else 0
+
+
+def ledger_find_by_tag(tag):
+    """Locate one entry across every source ledger by its [XXX-MSG-...] tag.
+
+    notify-open.sh only has the tag to hand — it is the one identifier that
+    appears in the notification, the forwarded subject and the ledger alike.
+    Returns (source, state, entry) or (None, None, None).
+    """
+    for source in SOURCE_LABEL:
+        state = ledger_load(source)
+        for entry in state["items"].values():
+            if entry.get("tag") == tag:
+                return source, state, entry
+    return None, None, None
+
+
 def gmail_force_unread(msg_ids, tool="gmail-sync"):
     """Add the UNREAD label back to freshly delivered notifications.
 
@@ -1139,7 +1442,7 @@ def gmail_force_unread(msg_ids, tool="gmail-sync"):
         f"{listing}\n\n"
         "Reply with the single word DONE followed by how many you updated."
     )
-    out = mcp_ask(prompt, GMAIL_WRITE_TOOLS, tool=tool)
+    out = mcp_ask(prompt, gmail_write_tools(), tool=tool)
     if out is None:
         log(tool, "warn", f"could not mark {len(ids)} message(s) unread")
         return 0

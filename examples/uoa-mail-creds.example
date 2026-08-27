@@ -1,4 +1,16 @@
-# Copy to ~/.uoa-mail-creds and chmod 600.
+# Institutional credentials for UoA webmail and eClass.
+#
+# Prefer the managed store, which encrypts them at rest and puts them in a
+# directory no other account can read:
+#
+#     ./bin/uoa-credentials.sh store uoa-mail     store them
+#     ./bin/uoa-credentials.sh migrate            move an existing plain file in
+#     ./bin/uoa-credentials.sh status             show where each secret lives
+#
+# This plain format is the fallback the store falls back to, and is still read
+# from ~/.uoa-mail-creds or from the credential store directory. If you use
+# it, chmod 600 the file.
+#
 # Line 1: username (without @uoa.gr)
 # Line 2: password
 # Line 3: optional separate SMTP password (defaults to line 2)

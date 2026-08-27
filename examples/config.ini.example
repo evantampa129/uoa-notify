@@ -30,3 +30,22 @@ horizon_days = 365
 base = https://eclass.uoa.gr
 sso = https://sso.uoa.gr
 timeout = 30
+
+[agent]
+# Gmail, Google Calendar, Google Drive and Trello are reached over MCP rather
+# than through their own API clients, by handing a single-shot prompt to an
+# assistant CLI that already holds the OAuth grants for those accounts.
+#
+# cli         the command to run, as it appears on PATH
+# mcp_prefix  the prefix its connector tool ids share, so that a connector
+#             named Gmail with a tool named get_message resolves to
+#             <mcp_prefix>Gmail__get_message
+#
+# Both are blank by default and no vendor name ships in the source. Leave
+# them blank and every MCP-backed step is skipped: notifications, deadline
+# parsing, the ledger and the local briefs all keep working, while Calendar
+# events, Trello cards, Drive filing and cross-device read sync do not.
+# They can also be supplied as UOA_AGENT_CLI and UOA_MCP_PREFIX.
+cli =
+mcp_prefix =
+timeout = 180

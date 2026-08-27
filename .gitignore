@@ -32,3 +32,8 @@ venv/
 .idea/
 *.swp
 .DS_Store
+
+# Credential store artefacts, in case one is ever copied into the tree.
+*.kdbx
+*.keyfile
+*.gpg

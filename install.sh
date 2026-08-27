@@ -15,10 +15,13 @@ CFG_DIR="$HOME/.config/check-uoa-mail"
 CFG="$CFG_DIR/config.ini"
 LOG_DIR="$HOME/.local/log"
 STATE_DIR="$HOME/.local/state"
+CRED_DIR="$HOME/.local/share/uoa-notify/credentials"
 
-ok()   { printf '  \033[32m✅\033[0m %s\n' "$*"; }
-warn() { printf '  \033[33m⚠️\033[0m  %s\n' "$*"; }
-bad()  { printf '  \033[31m❌\033[0m %s\n' "$*"; }
+# Plain status markers rather than emoji: this output is read in a terminal,
+# often over ssh, where a colour word beats a glyph that may not render.
+ok()   { printf '  \033[32m[ ok ]\033[0m %s\n' "$*"; }
+warn() { printf '  \033[33m[warn]\033[0m %s\n' "$*"; }
+bad()  { printf '  \033[31m[fail]\033[0m %s\n' "$*"; }
 
 MODE="install"
 case "${1:-}" in
@@ -59,17 +62,34 @@ done
 python3 -c "import requests, bs4" 2>/dev/null \
     && ok "python3 requests + beautifulsoup4" \
     || { bad "pip install requests beautifulsoup4"; MISSING=1; }
-if command -v claude >/dev/null 2>&1; then
-    ok "claude CLI (Gmail/Calendar/Trello/Drive access)"
+# The assistant CLI that drives the MCP connectors is named in the config,
+# never here, so this check reports what is configured rather than assuming.
+AGENT_CLI="${UOA_AGENT_CLI:-$(sed -n '/^\[agent\]/,/^\[/p' "$CFG" 2>/dev/null \
+    | sed -n 's/^[[:space:]]*cli[[:space:]]*=[[:space:]]*//p' | head -1)}"
+if [ -z "$AGENT_CLI" ]; then
+    warn "no assistant CLI configured ([agent] cli in $CFG)"
+    warn "  the system still runs, but Gmail read-sync, Calendar events,"
+    warn "  Trello cards and Drive filing will be skipped"
+elif command -v "$AGENT_CLI" >/dev/null 2>&1; then
+    ok "assistant CLI '$AGENT_CLI' (Gmail/Calendar/Trello/Drive access)"
 else
-    warn "claude CLI not on PATH — the system still runs, but Gmail read-sync,"
-    warn "  Calendar events, Trello and Drive steps will be skipped"
+    warn "assistant CLI '$AGENT_CLI' is configured but not on PATH"
 fi
+
+for c in keepassxc-cli secret-tool gpg; do
+    command -v "$c" >/dev/null 2>&1 && ok "$c (encrypted credential storage)" \
+        && break
+done
 [ "$MISSING" -eq 1 ] && { echo; bad "install the missing requirements first"; exit 1; }
 
 if [ "$MODE" = check ]; then
     echo; echo "Checking installation…"
-    [ -f "$HOME/.uoa-mail-creds" ] && ok "credentials present" || bad "missing ~/.uoa-mail-creds"
+    if [ -x "$BIN/uoa-credentials.sh" ] &&
+       "$BIN/uoa-credentials.sh" test uoa-mail >/dev/null 2>&1; then
+        ok "credentials readable"
+    else
+        bad "no readable credentials (./bin/uoa-credentials.sh status)"
+    fi
     [ -f "$CFG" ] && ok "config present" || bad "missing $CFG"
     [ -x "$BIN/check-uoa-mail.py" ] && ok "scripts installed" || bad "scripts not in $BIN"
     crontab -l 2>/dev/null | grep -q "check-uoa-mail.py" \
@@ -93,13 +113,21 @@ else
     ok "existing config left untouched"
 fi
 
-if [ ! -f "$HOME/.uoa-mail-creds" ]; then
-    warn "no ~/.uoa-mail-creds yet:"
-    echo "        printf '%s\\n%s\\n' USERNAME PASSWORD > ~/.uoa-mail-creds"
-    echo "        chmod 600 ~/.uoa-mail-creds"
+# The credential store is mode 700 and holds mode-600 files, so that neither
+# the secrets nor even their names are readable by another account.
+mkdir -p "$CRED_DIR" 2>/dev/null && chmod 700 "$CRED_DIR" 2>/dev/null \
+    && ok "credential store ready ($(printf '%s' "$CRED_DIR" | sed "s|$HOME|~|"), mode 700)"
+
+if "$SRC/bin/uoa-credentials.sh" test uoa-mail >/dev/null 2>&1; then
+    ok "credentials readable"
+    if [ -f "$HOME/.uoa-mail-creds" ]; then
+        chmod 600 "$HOME/.uoa-mail-creds"
+        warn "credentials are still a plain file; encrypt them with:"
+        echo "        ./bin/uoa-credentials.sh migrate"
+    fi
 else
-    chmod 600 "$HOME/.uoa-mail-creds"
-    ok "credentials present (mode set to 600)"
+    warn "no credentials stored yet:"
+    echo "        ./bin/uoa-credentials.sh store uoa-mail"
 fi
 
 case ":$PATH:" in
@@ -127,8 +155,8 @@ fi
 
 echo
 echo "Next steps:"
-echo "  1. put your email in $CFG      ([notify] recipient)"
-echo "  2. create ~/.uoa-mail-creds     (chmod 600)"
+echo "  1. put your email in $CFG   ([notify] recipient)"
+echo "  2. creds:  ./bin/uoa-credentials.sh store uoa-mail"
 echo "  3. test:   $BIN/check-uoa-mail.py --test-email"
 echo "  4. cron:   ./install.sh --cron"
 echo "  5. verify: ./install.sh --check"
