@@ -24,7 +24,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import uoa_common as U  # noqa: E402
@@ -34,11 +34,32 @@ SOURCES = ["webmail", "eclass", "eudoxus", "department", "gmail"]
 
 
 def apply_state(entry, info):
-    """Copy Gmail's verdict onto one ledger entry. Returns what changed."""
+    """Copy Gmail's verdict onto one ledger entry. Returns what changed.
+
+    Gmail is the source of truth, with one exception. An item the user just
+    opened from a desktop notification is read *here* before Gmail has been
+    told, and that local verdict is held as `read_push_pending`. Until the
+    push lands, Gmail's "still unread" is stale rather than authoritative:
+    copying it back would undo the click, reset notify_count and start the
+    alerts all over again. So the pending push is retried instead.
+    """
     changed = []
     if info.get("id") and entry.get("gmail_msg_id") != info["id"]:
         entry["gmail_msg_id"] = info["id"]
         changed.append("id")
+
+    if entry.get("read_push_pending") and not info.get("read"):
+        msg_id = entry.get("gmail_msg_id")
+        if msg_id and U.gmail_mark_read([msg_id], tool=TOOL):
+            entry["read_push_pending"] = False
+            entry["read_pushed_at"] = datetime.now(timezone.utc).isoformat(
+                timespec="seconds")
+            changed.append("pushed")
+        # Read either way: the user opened it, and a failed push is a
+        # transport problem to retry, not a reason to un-read the item.
+        entry["read"] = True
+        return changed
+
     was = bool(entry.get("read"))
     now = bool(info.get("read"))
     if was != now:
@@ -49,6 +70,7 @@ def apply_state(entry, info):
         else:
             # Marked unread again on some device — let it notify once more.
             entry["notify_count"] = 0
+            entry.pop("read_push_pending", None)
             changed.append("unread")
     return changed
 
@@ -80,7 +102,7 @@ def main():
     forced_unread = 0
     for source in SOURCES:
         state = U.ledger_load(source)
-        changes = {"read": 0, "unread": 0, "id": 0}
+        changes = {"read": 0, "unread": 0, "id": 0, "pushed": 0}
         to_unread = []
 
         if gmail_state is not None:

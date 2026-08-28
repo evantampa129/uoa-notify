@@ -35,9 +35,14 @@ import uoa_common as U  # noqa: E402
 
 TOOL = "notify"
 
-# category -> (notify-send urgency, indicator emoji)
-URGENCY = {"urgent": ("critical", "🔴"), "grade": ("critical", "📝"),
-           "deadline": ("normal", "🟡"), "file": ("normal", "📎"),
+# category -> (notify-send urgency, severity dot)
+#
+# The dot is the priority signal, not decoration: it is the part of the title
+# that still reads at a glance in a notification banner or a truncated phone
+# subject line. Categories that carry no urgency of their own borrow the dot
+# of the urgency they map to.
+URGENCY = {"urgent": ("critical", "🔴"), "grade": ("critical", "🔴"),
+           "deadline": ("normal", "🟡"), "file": ("normal", "🟡"),
            "info": ("low", "🟢")}
 
 # --urgency urgent/normal/info -> internal category
@@ -90,7 +95,7 @@ def dispatch(source, message_id, title, body="", category="info", url="",
         label = U.SOURCE_LABEL.get(source, source)
         text = body or ""
         if due:
-            text = f"⏰ {due}\n{text}"
+            text = f"Due: {due}\n{text}"
         repeat = int(entry.get("notify_count") or 0)
         head = f"{dot} {label} · {title}"
         if repeat:
@@ -99,7 +104,8 @@ def dispatch(source, message_id, title, body="", category="info", url="",
             print(f"--- DRY RUN desktop: {head[:160]} -> {source_url} ---")
             entry["notified"] = True
         elif U.notify_send(head[:160], text[:400], urgency, TOOL,
-                           url=source_url):
+                           url=source_url, tag=tag, source=source,
+                           message_id=message_id):
             entry["notified"] = True
             entry["notify_count"] = repeat + 1
             entry["last_notified"] = datetime.now(timezone.utc).isoformat(
@@ -118,7 +124,7 @@ def dispatch(source, message_id, title, body="", category="info", url="",
                 f'<h2 style="margin:0 0 6px">{dot} {U.esc_html(subject)}</h2>'
                 f'<p style="color:#666;margin:0 0 10px">'
                 f'{U.esc_html(U.SOURCE_LABEL.get(source, source))}'
-                + (f' · ⏰ <b>{U.esc_html(due)}</b>' if due else "") + '</p>'
+                + (f' · due <b>{U.esc_html(due)}</b>' if due else "") + '</p>'
                 + (f'<p><a href="{U.esc_html(source_url)}">Open original</a></p>'
                    if source_url else "")
                 + f'<hr><pre style="white-space:pre-wrap;font-family:inherit">'
@@ -190,13 +196,15 @@ def renotify_unread(source, dry_run=False, limit=12):
         head = f"{dot} {label} · (unread) {subject}"[:160]
         body = ""
         if entry.get("due"):
-            body = f"⏰ {entry['due']}"
+            body = f"Due: {entry['due']}"
         if dry_run:
             print(f"--- DRY RUN re-notify: {head} ---")
             again += 1
             continue
         if U.notify_send(head, body, urgency, TOOL,
-                         url=U.source_link(source, entry.get("url", ""))):
+                         url=U.source_link(source, entry.get("url", "")),
+                         tag=entry.get("tag", ""), source=source,
+                         message_id=entry.get("message_id", "")):
             entry["notify_count"] = repeat + 1
             entry["last_notified"] = datetime.now(timezone.utc).isoformat(
                 timespec="seconds")
@@ -208,9 +216,72 @@ def renotify_unread(source, dry_run=False, limit=12):
     return again
 
 
+def mark_read(source=None, message_id=None, tag=None, dry_run=False):
+    """Record that the user opened an item, and make that verdict stick.
+
+    Called by notify-open.sh the moment a notification is activated. Two
+    things have to happen, in this order and for different reasons:
+
+      1. Set `read` in the local ledger. This is what stops the desktop
+         alert being re-fired on the next cron cycle, and it takes effect
+         immediately, with no network involved.
+      2. Push the same verdict to Gmail by removing the UNREAD label. Gmail
+         is the declared source of truth for read state across devices, so
+         without this step the next sync-read-status.py run would see the
+         message still unread, flip the ledger back, reset notify_count and
+         start notifying all over again — which is precisely the bug where
+         "I clicked it and it came back".
+
+    When the push cannot be made (offline, no assistant CLI configured), the
+    entry is left flagged `read_push_pending` so sync retries it instead of
+    treating the local read as stale. Returns True if anything was recorded.
+    """
+    if tag and not (source and message_id):
+        source, state, entry = U.ledger_find_by_tag(tag)
+        if entry is None:
+            U.log(TOOL, "warn", f"no ledger entry for tag {tag}")
+            return False
+    else:
+        if not (source and message_id):
+            U.log(TOOL, "warn", "mark_read needs --tag, or --source and "
+                                "--message-id")
+            return False
+        state = U.ledger_load(source)
+        entry = state["items"].get(message_id)
+        if entry is None:
+            U.log(TOOL, "warn", f"no ledger entry for {source}/{message_id}")
+            return False
+
+    if dry_run:
+        print(f"--- DRY RUN mark-read: {source}/{entry.get('tag')} ---")
+        return True
+
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    entry["read"] = True
+    entry["opened_at"] = now
+    entry["read_synced_at"] = datetime.now().isoformat(timespec="seconds")
+
+    # Attempt the push straight away; flag it pending either way so a failure
+    # is retried rather than silently lost.
+    entry["read_push_pending"] = True
+    U.ledger_save(source, state)
+
+    msg_id = entry.get("gmail_msg_id")
+    if msg_id and U.gmail_mark_read([msg_id], tool=TOOL):
+        entry["read_push_pending"] = False
+        entry["read_pushed_at"] = now
+        U.ledger_save(source, state)
+        U.log(TOOL, "info", f"opened and marked read: {entry.get('tag')}")
+    else:
+        U.log(TOOL, "info",
+              f"opened and marked read locally: {entry.get('tag')} "
+              f"(Gmail push pending)")
+    return True
+
+
 def main():
     p = argparse.ArgumentParser(description="Central UoA notification hub.")
-    p.add_argument("--source", required=True,
+    p.add_argument("--source",
                    choices=["webmail", "eclass", "eudoxus", "department", "gmail"])
     p.add_argument("--message-id", help="unique id of the item")
     p.add_argument("--title", help="notification title")
@@ -223,10 +294,22 @@ def main():
     p.add_argument("--due", default="")
     p.add_argument("--renotify-unread", action="store_true",
                    help="re-fire desktop alerts for unread items and exit")
+    p.add_argument("--mark-read", action="store_true",
+                   help="record that an item was opened, and push that to "
+                        "Gmail (used by notify-open.sh)")
+    p.add_argument("--tag", help="[XXX-MSG-xxxxxxxx] tag, for --mark-read")
     p.add_argument("--no-forward", dest="forward", action="store_false")
     p.add_argument("--no-desktop", dest="desktop", action="store_false")
     p.add_argument("--dry-run", action="store_true")
     a = p.parse_args()
+
+    if a.mark_read:
+        ok = mark_read(a.source, a.message_id, a.tag, dry_run=a.dry_run)
+        print(f"marked_read={ok}")
+        return 0 if ok else 1
+
+    if not a.source:
+        p.error("--source is required")
 
     if a.renotify_unread:
         n = renotify_unread(a.source, dry_run=a.dry_run)
