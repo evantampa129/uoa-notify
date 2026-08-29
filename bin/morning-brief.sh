@@ -55,13 +55,13 @@ fi
 # ---- 4. MCP-backed sources ------------------------------------------------
 : > "$WORK/calendar.txt"; : > "$WORK/trello.txt"
 if have_network; then
-    mcp_ask 200 "mcp__claude_ai_Google_Calendar__list_events,mcp__claude_ai_Google_Calendar__list_calendars" \
+    mcp_ask 200 "$(mcp_tools Google_Calendar list_events,list_calendars)" \
 "List my Google Calendar events for today and tomorrow across all my calendars. \
 One per line as: - DAY TIME | TITLE
 where DAY is Today or Tomorrow. If none, output exactly: NONE
 No preamble." > "$WORK/calendar.txt" 2>/dev/null || true
 
-    mcp_ask 200 "mcp__claude_ai_Trello__trelloSearch,mcp__claude_ai_Trello__trelloReadBoard,mcp__claude_ai_Trello__trelloReadCard,mcp__claude_ai_Trello__trelloReadList" \
+    mcp_ask 200 "$(mcp_tools Trello trelloSearch,trelloReadBoard,trelloReadCard,trelloReadList)" \
 "List my Trello cards with a due date within the next 7 days, or already overdue. \
 One per line as: - DUEDATE | CARD NAME | BOARD
 If none, output exactly: NONE
@@ -108,7 +108,7 @@ except OSError:
     review = []
 
 def mark(e):
-    return "✅" if e.get("read") else "❌"
+    return "✓" if e.get("read") else "✗"
 
 def link(e, source):
     return U.source_link(source, e.get("url", ""))
@@ -149,17 +149,17 @@ exams = [t for t in deadlines if t[1] <= 14
          and any(k in U.normalize(t[2].get("subject", "")) for k in EXAM)]
 exam_mode = ""
 if len(exams) >= 3:
-    exam_mode = (f"⚠️ EXAM MODE: {len(exams)} εξετάσεις μέσα σε "
+    exam_mode = (f"[warn] EXAM MODE: {len(exams)} εξετάσεις μέσα σε "
                  f"{max(e[1] for e in exams)} ημέρες")
 
-subject = (f"🎓 Morning Brief - {today.strftime('%d/%m/%Y')} "
+subject = (f"Morning Brief - {today.strftime('%d/%m/%Y')} "
            f"- {total_unread} unread")
 
 T, H = [], []
 T.append(f"MORNING BRIEF — {today.strftime('%A %d %B %Y')}")
 T.append("=" * 56)
 H.append('<div style="font-family:system-ui,-apple-system,sans-serif;max-width:720px">')
-H.append(f'<h1 style="margin:0 0 2px;font-size:22px">🎓 Morning Brief</h1>'
+H.append(f'<h1 style="margin:0 0 2px;font-size:22px">Morning Brief</h1>'
          f'<p style="color:#666;margin:0 0 16px">'
          f'{U.esc_html(today.strftime("%A %d %B %Y"))} · '
          f'<b style="color:{"#c00" if total_unread else "#080"}">'
@@ -191,9 +191,9 @@ def bullets(rows, empty):
     H.append("</ul>")
 
 # ---- 1. UNREAD — the most important section -------------------------------
-head(f"⚠️ UNREAD — {total_unread} not opened yet")
+head(f"[warn] UNREAD — {total_unread} not opened yet")
 if not unread_by_source:
-    bullets([], "everything has been read 🎉")
+    bullets([], "everything has been read ")
 else:
     for source, items in unread_by_source.items():
         label = U.SOURCE_LABEL.get(source, source)
@@ -203,12 +203,12 @@ else:
         for e in items[:12]:
             subj = (e.get("subject") or "(no subject)")[:100]
             url = link(e, source)
-            t = f"❌ {subj}" + (f" — ⏰ {e['due']}" if e.get("due") else "")
+            t = f"[fail] {subj}" + (f" — due {e['due']}" if e.get("due") else "")
             T.append(f"    {t}")
             if url:
                 T.append(f"       {url}")
-            H.append(f'<li>❌ {U.esc_html(subj)}'
-                     + (f' · <span style="color:#c00">⏰ {U.esc_html(e["due"])}</span>'
+            H.append(f'<li>[fail] {U.esc_html(subj)}'
+                     + (f' · <span style="color:#c00">due {U.esc_html(e["due"])}</span>'
                         if e.get("due") else "")
                      + (f' · <a href="{U.esc_html(url)}">open</a>' if url else "")
                      + '</li>')
@@ -231,20 +231,20 @@ def deadline_rows(group):
             + (f' · <a href="{U.esc_html(url)}">open</a>' if url else "")))
     return rows
 
-head(f"🔴 URGENT — deadlines within 3 days ({len(urgent)})")
+head(f"URGENT — deadlines within 3 days ({len(urgent)})")
 bullets(deadline_rows(urgent), "nothing due in the next three days")
 
-head(f"🟡 THIS WEEK — deadlines within 7 days ({len(this_week)})")
+head(f"THIS WEEK — deadlines within 7 days ({len(this_week)})")
 bullets(deadline_rows(this_week), "nothing else due this week")
 
 # ---- 4. calendar -----------------------------------------------------------
-head("📅 TODAY & TOMORROW")
+head("TODAY & TOMORROW")
 bullets([(c, U.esc_html(c)) for c in cal],
         "no events (or Calendar unavailable)")
 
 # ---- 5. new in the last 24h ------------------------------------------------
 n24 = sum(len(v) for v in recent_by_source.values())
-head(f"📧 NEW LAST 24H — {n24}")
+head(f"NEW LAST 24H — {n24}")
 if not recent_by_source:
     bullets([], "nothing new since yesterday")
 else:
@@ -263,11 +263,11 @@ else:
         H.append("</ul>")
 
 # ---- 6. tasks / 7. review --------------------------------------------------
-head("📋 TASKS — Trello due this week")
+head("TASKS — Trello due this week")
 bullets([(t, U.esc_html(t)) for t in trello],
         "nothing due (or Trello unavailable)")
 
-head("📖 TO REVIEW — vault notes tagged #status/review")
+head("TO REVIEW — vault notes tagged #status/review")
 bullets([(r, U.esc_html(r)) for r in review[:20]], "none")
 
 H.append('<hr style="margin-top:22px"><p style="color:#999;font-size:85%">'
@@ -283,7 +283,7 @@ print(f"composed: {total_unread} unread, {len(urgent)} urgent, "
 U.log(TOOL, "info", f"brief: {total_unread} unread, {len(urgent)} urgent")
 PYEOF
 
-SUBJECT="$(cat "$WORK/subject.txt" 2>/dev/null || echo "🎓 Morning Brief")"
+SUBJECT="$(cat "$WORK/subject.txt" 2>/dev/null || echo "Morning Brief")"
 if [ -s "$WORK/body.txt" ]; then
     "$BIN_DIR/uoa-sendmail.py" --subject "$SUBJECT" --text "$WORK/body.txt" \
         --html "$WORK/body.html" --tool "$TOOL_NAME" $DRY \

@@ -36,7 +36,7 @@ fi
 TRELLO_FILE="$(mktemp)"; trap 'rm -f "$TRELLO_FILE"' EXIT
 : > "$TRELLO_FILE"
 if have_network; then
-    mcp_ask 150 "mcp__claude_ai_Trello__trelloSearch,mcp__claude_ai_Trello__trelloReadBoard,mcp__claude_ai_Trello__trelloReadList,mcp__claude_ai_Trello__trelloReadCard" \
+    mcp_ask 150 "$(mcp_tools Trello trelloSearch,trelloReadBoard,trelloReadList,trelloReadCard)" \
 "List my Trello cards that are due within the next 7 days or already overdue. \
 One per line as: - DUEDATE | CARD NAME | BOARD
 If none, output exactly: NONE
@@ -79,7 +79,7 @@ total_n  = len(today_items)
 unread_n = total_n - read_n
 
 def mark(e):
-    return "✅" if e.get("read") else "❌"
+    return "✓" if e.get("read") else "✗"
 
 def line(e):
     label = U.SOURCE_LABEL.get(e["_source"], e["_source"])
@@ -87,7 +87,7 @@ def line(e):
     url   = U.source_link(e["_source"], e.get("url", ""))
     txt   = f"- {mark(e)} **{label}** · {subj}"
     if e.get("due"):
-        txt += f" — ⏰ `{e['due']}`"
+        txt += f" — due `{e['due']}`"
     if url:
         txt += f" · [open]({url})"
     return txt
@@ -118,13 +118,13 @@ upcoming.sort(key=lambda t: t[0])
 
 # ---- compose ---------------------------------------------------------------
 pretty = datetime.strptime(day, "%Y-%m-%d").strftime("%A %d %B %Y")
-B = [f"# 📓 {pretty}", ""]
+B = [f"# {pretty}", ""]
 B.append(f"**Summary:** Read: {read_n}/{total_n} notifications "
          f"({unread_n} unread today, {len(all_unread)} unread overall)")
 B.append("")
 
 if today_items:
-    B += ["## 📥 Today's notifications", ""]
+    B += ["## Today's notifications", ""]
     by_source = {}
     for e in today_items:
         by_source.setdefault(e["_source"], []).append(e)
@@ -136,16 +136,16 @@ if today_items:
         B += [line(e) for e in group]
         B.append("")
 else:
-    B += ["## 📥 Today's notifications", "", "_Nothing arrived today._", ""]
+    B += ["## Today's notifications", "", "_Nothing arrived today._", ""]
 
 if all_unread:
-    B += ["## ⚠️ Still unread", ""]
+    B += ["## [warn] Still unread", ""]
     for e in all_unread[:25]:
         B.append(line(e))
     B.append("")
 
 if upcoming:
-    B += ["## ⏰ Upcoming deadlines", ""]
+    B += ["## due Upcoming deadlines", ""]
     for d, e in upcoming[:15]:
         left = (d - date.fromisoformat(day)).days
         word = "today" if left == 0 else ("tomorrow" if left == 1 else f"{left} days")
@@ -154,12 +154,12 @@ if upcoming:
     B.append("")
 
 tl = trello_lines()
-B += ["## 📋 Trello", ""]
+B += ["## Trello", ""]
 B += ([f"- {t}" for t in tl] if tl else ["_Nothing due, or Trello unavailable._"])
 B.append("")
 
 if mocs:
-    B += ["## 📚 Courses touched today", ""]
+    B += ["## Courses touched today", ""]
     B += [f"- [[{m}]]" for m in mocs]
     B.append("")
 
@@ -177,12 +177,12 @@ else:
                        "unread": unread_n},
                       body)
     if ok:
-        print(f"✅ {path.replace(os.path.expanduser('~'), '~')}")
+        print(f"[ok] {path.replace(os.path.expanduser('~'), '~')}")
         print(f"   Read: {read_n}/{total_n} notifications ({unread_n} unread)")
         U.log(TOOL, "info", f"wrote daily log {day}: "
                             f"{read_n}/{total_n} read, {unread_n} unread")
     else:
-        print(f"❌ could not write {path}")
+        print(f"[fail] could not write {path}")
         U.log(TOOL, "error", f"failed writing daily log {path}")
         sys.exit(1)
 PYEOF

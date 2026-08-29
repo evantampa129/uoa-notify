@@ -55,7 +55,7 @@ if ! date -d "$DATE" >/dev/null 2>&1; then
 fi
 
 log INFO "manual deadline: '$TITLE' due $DATE${COURSE:+ (course: $COURSE)}"
-echo "📌 $TITLE — due $DATE${TIME:+ at $TIME}${COURSE:+  ·  $COURSE}"
+echo "$TITLE — due $DATE${TIME:+ at $TIME}${COURSE:+  ·  $COURSE}"
 
 export DL_TITLE="$TITLE" DL_DATE="$DATE" DL_COURSE="$COURSE" \
        DL_TIME="$TIME" DL_NOTES="$NOTES" DL_DRY="$DRY"
@@ -84,7 +84,7 @@ detail = "\n".join(filter(None, [
 ok_cal = U.calendar_add_deadline(label, due, tm, detail,
                                  source_url="manual entry",
                                  dry_run=dry, tool=TOOL)
-print(f"  {'✅' if ok_cal else '❌'} Calendar event + reminders (3 days, 1 day)")
+print(f"  {'✓' if ok_cal else '✗'} Calendar event + reminders (3 days, 1 day)")
 if not ok_cal:
     U.log(TOOL, "warn", f"calendar event not created for '{label}'")
 
@@ -101,13 +101,13 @@ prompt = (
     "Do not ask questions. Reply with the single word DONE and the card URL."
 )
 if dry:
-    print(f"  ✅ Trello card (dry run): {label} due {due_iso}")
+    print(f"  [ok] Trello card (dry run): {label} due {due_iso}")
     ok_trello = True
 else:
-    out = U.mcp_ask(prompt, U.TRELLO_TOOLS, tool=TOOL)
+    out = U.mcp_ask(prompt, U.trello_tools(), tool=TOOL)
     ok_trello = bool(out) and ("DONE" in (out or "").upper()
                                or "trello.com" in (out or "").lower())
-    print(f"  {'✅' if ok_trello else '❌'} Trello card"
+    print(f"  {'✓' if ok_trello else '✗'} Trello card"
           + ("" if ok_trello else " (unavailable — logged, calendar/note still done)"))
     U.log(TOOL, "info" if ok_trello else "warn",
           f"trello card '{label}': {(out or 'no reply')[:200]}")
@@ -125,7 +125,7 @@ body = "\n".join(filter(None, [
     "- [ ] Submitted",
 ]))
 if dry:
-    print(f"  ✅ Obsidian note (dry run): {path}")
+    print(f"  [ok] Obsidian note (dry run): {path}")
 else:
     try:
         os.makedirs(folder, exist_ok=True)
@@ -134,13 +134,13 @@ else:
                       "tags": "[deadline, uoa]", "status": "status/todo",
                       "source": "manual"},
                      body)
-        print(f"  ✅ Obsidian note: {path.replace(os.path.expanduser('~'), '~')}")
+        print(f"  [ok] Obsidian note: {path.replace(os.path.expanduser('~'), '~')}")
         U.log(TOOL, "info", f"wrote note {path}")
     except OSError as exc:
-        print(f"  ❌ Obsidian note failed: {exc}")
+        print(f"  [fail] Obsidian note failed: {exc}")
         U.log(TOOL, "error", f"cannot write note {path}: {exc}")
 
 when = ("today" if days_left == 0 else
         "tomorrow" if days_left == 1 else f"in {days_left} days")
-print(f"\n⏰ {label} — {when}")
+print(f"\ndue {label} — {when}")
 PYEOF

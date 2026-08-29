@@ -47,7 +47,7 @@ NEW_NOTES=0
 
 : > "$WORK/trello.txt"
 if have_network; then
-    mcp_ask 200 "mcp__claude_ai_Trello__trelloSearch,mcp__claude_ai_Trello__trelloReadBoard,mcp__claude_ai_Trello__trelloReadList,mcp__claude_ai_Trello__trelloReadCard" \
+    mcp_ask 200 "$(mcp_tools Trello trelloSearch,trelloReadBoard,trelloReadList,trelloReadCard)" \
 "List my Trello cards that are overdue, or due within the next 21 days. \
 One per line as: - DUEDATE | STATUS | CARD NAME | BOARD
 where STATUS is OVERDUE or DUE. If none, output exactly: NONE
@@ -125,15 +125,15 @@ for source in U.LEDGER_FILES:
 upcoming.sort(key=lambda t: t[0])
 
 def mark(e):
-    return "✅" if e.get("read") else "❌"
+    return "✓" if e.get("read") else "✗"
 
-subject = f"📋 Weekly Review - {rng} - {total_unread} unread"
+subject = f"Weekly Review - {rng} - {total_unread} unread"
 
 T, H = [], []
 T.append(f"WEEKLY REVIEW — {rng}")
 T.append("=" * 56)
 H.append('<div style="font-family:system-ui,-apple-system,sans-serif;max-width:720px">')
-H.append(f'<h1 style="margin:0 0 2px;font-size:22px">📋 Weekly Review</h1>'
+H.append(f'<h1 style="margin:0 0 2px;font-size:22px">Weekly Review</h1>'
          f'<p style="color:#666;margin:0 0 16px">{U.esc_html(rng)} · '
          f'{len(week_items)} notifications · <b>{total_unread} still unread</b></p>')
 
@@ -153,21 +153,21 @@ def bullets(rows, empty):
     H.append("</ul>")
 
 # ---- unread first: the thing that matters ---------------------------------
-head(f"⚠️ STILL UNREAD — {total_unread}")
+head(f"[warn] STILL UNREAD — {total_unread}")
 rows = []
 for e in unread_items[:25]:
     label = U.SOURCE_LABEL.get(e["_source"], e["_source"])
     subj = (e.get("subject") or "(no subject)")[:100]
     url = U.source_link(e["_source"], e.get("url", ""))
-    t = f"[{label}] {subj}" + (f" — ⏰ {e['due']}" if e.get("due") else "")
+    t = f"[{label}] {subj}" + (f" — due {e['due']}" if e.get("due") else "")
     h = (f'<b>{U.esc_html(label)}</b> · {U.esc_html(subj)}'
-         + (f' · <span style="color:#c00">⏰ {U.esc_html(e["due"])}</span>' if e.get("due") else "")
+         + (f' · <span style="color:#c00">due {U.esc_html(e["due"])}</span>' if e.get("due") else "")
          + (f' · <a href="{U.esc_html(url)}">open</a>' if url else ""))
     rows.append((t, h))
-bullets(rows, "nothing unread — inbox zero 🎉")
+bullets(rows, "nothing unread — inbox zero ")
 
 # ---- read vs unread per source --------------------------------------------
-head("📊 READ vs UNREAD, by source")
+head("READ vs UNREAD, by source")
 rows = []
 for source, s in per_source.items():
     if not s["total"]:
@@ -183,7 +183,7 @@ for source, s in per_source.items():
 bullets(rows, "no notifications this week")
 
 # ---- deadlines -------------------------------------------------------------
-head("⏰ DEADLINES — next 3 weeks")
+head("due DEADLINES — next 3 weeks")
 rows = []
 for d, e in upcoming[:25]:
     left = (d - today).days
@@ -202,13 +202,13 @@ H.append(f'<p style="color:#666">Deadlines passed this week: <b>{done_past}</b> 
          f'still pending: <b>{len(upcoming)}</b></p>')
 
 # ---- grades ----------------------------------------------------------------
-head("📝 GRADES posted this week")
+head("GRADES posted this week")
 bullets([((e.get("subject") or "")[:100],
           U.esc_html((e.get("subject") or "")[:100]) + " " + mark(e))
          for e in grades[:15]], "no grades posted")
 
 # ---- everything that arrived ----------------------------------------------
-head(f"📧 EVERYTHING THIS WEEK — {len(week_items)}")
+head(f"EVERYTHING THIS WEEK — {len(week_items)}")
 rows = []
 for e in week_items[:40]:
     label = U.SOURCE_LABEL.get(e["_source"], e["_source"])
@@ -217,11 +217,11 @@ for e in week_items[:40]:
                  f'{mark(e)} <b>{U.esc_html(label)}</b> · {U.esc_html(subj)}'))
 bullets(rows, "nothing arrived this week")
 
-head("📋 TRELLO — overdue and due soon")
+head("TRELLO — overdue and due soon")
 bullets([(t, U.esc_html(t)) for t in trello],
         "nothing due, or Trello unavailable")
 
-head("📖 VAULT")
+head("VAULT")
 T.append(f"  Notes created or edited this week: {new_notes}")
 H.append(f'<p>Notes created or edited this week: <b>{U.esc_html(new_notes)}</b></p>')
 bullets([(r, U.esc_html(r)) for r in review[:20]],
@@ -240,7 +240,7 @@ print(f"composed: {len(week_items)} items, {total_unread} unread, "
 U.log(TOOL, "info", f"week {rng}: {len(week_items)} items, {total_unread} unread")
 PYEOF
 
-SUBJECT="$(cat "$WORK/subject.txt" 2>/dev/null || echo "📋 Weekly Review")"
+SUBJECT="$(cat "$WORK/subject.txt" 2>/dev/null || echo "Weekly Review")"
 if [ -s "$WORK/body.txt" ]; then
     "$BIN_DIR/uoa-sendmail.py" --subject "$SUBJECT" --text "$WORK/body.txt" \
         --html "$WORK/body.html" --tool "$TOOL_NAME" $DRY \

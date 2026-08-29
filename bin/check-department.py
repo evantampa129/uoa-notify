@@ -185,17 +185,17 @@ def main():
     if args.email and findings:
         user, _, smtp_pw = U.read_credentials(TOOL)
         lines, html = [], ['<div style="font-family:system-ui,sans-serif">'
-                           '<h2>🏛 Department updates</h2><ul>']
+                           '<h2>Department updates</h2><ul>']
         for f in findings:
             lines.append(f"• {f['title']}\n  {f['url']}"
-                         + (f"\n  ⏰ due {U.due_str(f)}" if f["due_date"] else ""))
+                         + (f"\n  due {U.due_str(f)}" if f["due_date"] else ""))
             html.append(f'<li><b>{U.esc_html(f["title"])}</b><br>'
                         f'<a href="{U.esc_html(f["url"])}">{U.esc_html(f["url"])}</a>'
-                        + (f'<br>⏰ due {U.esc_html(U.due_str(f))}' if f["due_date"] else "")
+                        + (f'<br>due {U.esc_html(U.due_str(f))}' if f["due_date"] else "")
                         + '</li>')
         html.append("</ul></div>")
         U.send_mail(cfg, user, smtp_pw,
-                    f"🏛 di.uoa.gr — {len(findings)} new announcement(s)",
+                    f"di.uoa.gr — {len(findings)} new announcement(s)",
                     "\n\n".join(lines), "".join(html),
                     dry_run=args.dry_run, tool=TOOL)
 
@@ -203,7 +203,7 @@ def main():
         for f in findings:
             if not f["due_date"] or f["id"] in state["calendared"]:
                 continue
-            if U.calendar_add_deadline(f"🏛 {f['title'][:80]}", f["due_date"],
+            if U.calendar_add_deadline(f"{f['title'][:80]}", f["due_date"],
                                        f["due_time"], f"Department announcement",
                                        f["url"], dry_run=args.dry_run, tool=TOOL):
                 state["calendared"][f["id"]] = now_ts

@@ -178,12 +178,12 @@ def summary_email(cfg, user, pw, messages, hours, dry_run):
     for m in messages:
         buckets[m["bucket"]].append(m)
     n = len(messages)
-    subject = (f"📬 UoA Daily Summary — {n} unread"
+    subject = (f"UoA Daily Summary — {n} unread"
                + (f" · {len(buckets['urgent'])} urgent" if buckets["urgent"] else "")
                + f" ({datetime.now().strftime('%d %b')})")
     text = [f"UoA unread mail, last {hours}h — {today}", "=" * 52, ""]
     html = [f'<div style="font-family:system-ui,sans-serif;max-width:680px">'
-            f'<h2 style="margin:0">📬 UoA Daily Summary</h2>'
+            f'<h2 style="margin:0">UoA Daily Summary</h2>'
             f'<p style="color:#666">Last {hours}h · {U.esc_html(today)} · {n} unread</p>']
     if n == 0:
         text.append("Nothing unread.")
@@ -199,11 +199,11 @@ def summary_email(cfg, user, pw, messages, hours, dry_run):
             text.append(f"  • {m['subject']}")
             text.append(f"    {m['from']} · {m['date']}")
             if m["due_date"]:
-                text.append(f"    ⏰ due {U.due_str(m)}")
+                text.append(f"    due {U.due_str(m)}")
             html.append(f'<li><b>{U.esc_html(m["subject"])}</b><br>'
                         f'<span style="color:#666;font-size:90%">{U.esc_html(m["from"])} · '
                         f'{U.esc_html(m["date"])}</span>'
-                        + (f'<br><span style="color:#c00">⏰ due {U.esc_html(U.due_str(m))}</span>'
+                        + (f'<br><span style="color:#c00">due {U.esc_html(U.due_str(m))}</span>'
                            if m["due_date"] else "") + "</li>")
         text.append("")
         html.append("</ul>")
@@ -287,7 +287,7 @@ def main():
     user, password, smtp_pw = U.read_credentials(TOOL)
 
     if args.test_email:
-        ok = U.send_mail(cfg, user, smtp_pw, "✅ check-uoa-mail test",
+        ok = U.send_mail(cfg, user, smtp_pw, "[ok] check-uoa-mail test",
                          "SMTP works.", dry_run=args.dry_run, tool=TOOL)
         print("test email sent" if ok else "test email FAILED")
         return 0 if ok else 4
@@ -352,7 +352,7 @@ def main():
         for m in messages:
             body = m["subject"]
             if m["due_date"]:
-                body += f"\n⏰ {U.due_str(m)}"
+                body += f"\ndue {U.due_str(m)}"
             dispatch("webmail", m["id"], m["from"][:80],
                      f"{body}\n{m['date']}", U.category_for(m),
                      url="", due=U.due_str(m), subject=m["subject"],
@@ -379,7 +379,7 @@ def main():
                 U.log(TOOL, "warn", f"cannot write .ics: {exc}")
 
             created = U.calendar_add_deadline(
-                f"📧 {m['subject']}", m["due_date"], m["due_time"],
+                f"{m['subject']}", m["due_date"], m["due_time"],
                 f"From: {m['from']}\nReceived: {m['date']}", "UoA email",
                 dry_run=args.dry_run, tool=TOOL)
             if created:

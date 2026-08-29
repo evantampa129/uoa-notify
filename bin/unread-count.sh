@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # unread-count.sh — total unread notifications across every source.
 #
-# Prints "📧 5" (or "📧 0"). Safe for polybar/i3status/waybar: it only reads
+# Prints "UoA 5" (or "UoA 0"). Safe for polybar/i3status/waybar: it only reads
 # local ledger files, never touches the network, and always exits 0 with
 # something printable even if the state files are missing or corrupt.
 #
@@ -14,7 +14,7 @@ export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin"
 
 MODE="${1:---icon}"
 
-python3 - "$MODE" <<'PYEOF' 2>/dev/null || echo "📧 ?"
+python3 - "$MODE" <<'PYEOF' 2>/dev/null || echo "UoA ?"
 import json, os, sys
 sys.path.insert(0, os.path.expanduser("~/bin"))
 mode = sys.argv[1] if len(sys.argv) > 1 else "--icon"
@@ -37,7 +37,7 @@ elif mode == "--waybar":
     cls = "urgent" if urgent else ("unread" if total else "clear")
     tip = ", ".join(f"{k}: {v}" for k, v in counts.items()
                     if k != "total" and v) or "nothing unread"
-    print(json.dumps({"text": f"📧 {total}", "class": cls,
+    print(json.dumps({"text": f"UoA {total}", "class": cls,
                       "tooltip": tip, "alt": cls}, ensure_ascii=False))
 elif mode == "--by-source":
     for k, v in counts.items():
@@ -45,5 +45,5 @@ elif mode == "--by-source":
             print(f"{k:11} {v}")
     print(f"{'total':11} {total}")
 else:
-    print(f"📧 {total}" + (f" 🔴{urgent}" if urgent else ""))
+    print(f"UoA {total}" + (f" 🔴{urgent}" if urgent else ""))
 PYEOF

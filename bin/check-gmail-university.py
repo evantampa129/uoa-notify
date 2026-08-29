@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Find university-related mail in Gmail, categorise it and act on it.
 
-Gmail is reached through the Gmail MCP connector via a headless `claude -p`
-call, because a cron job has no MCP client of its own. If the CLI or the
-network is unavailable the script logs it and exits cleanly — the local
-checkers keep working without it.
+Gmail is reached through the Gmail MCP connector, driven by the assistant CLI
+named in the [agent] section of the config, because a cron job has no MCP
+client of its own. If no CLI is configured, it is not on PATH, or the network
+is unavailable, the script logs it and exits cleanly — the local checkers
+keep working without it.
 """
 
 import argparse
@@ -56,7 +57,7 @@ def save_attachments_to_drive(msg, dry_run=False):
         f"({names}) from Gmail message id {msg['id']} into that folder. "
         f"Reply with the single word DONE when finished, or CANNOT if the "
         f"attachments cannot be copied.")
-    out = U.mcp_ask(prompt, U.DRIVE_TOOLS + U.GMAIL_READ_TOOLS, tool=TOOL)
+    out = U.mcp_ask(prompt, U.drive_tools() + U.gmail_read_tools(), tool=TOOL)
     ok = bool(out) and "DONE" in out.upper()
     U.log(TOOL, "info" if ok else "warn",
           f"drive filing for '{msg.get('subject','')[:50]}': {(out or 'no reply')[:120]}")
@@ -81,7 +82,7 @@ def main():
     state = U.ledger_load(SOURCE)
 
     messages = U.mcp_json(SEARCH_PROMPT.format(days=args.days),
-                          U.GMAIL_READ_TOOLS, tool=TOOL, default=None)
+                          U.gmail_read_tools(), tool=TOOL, default=None)
     if messages is None:
         U.log(TOOL, "warn", "Gmail unavailable this run; nothing to do")
         if args.json:
@@ -131,7 +132,7 @@ def main():
         if args.calendar and item["due_date"]:
             if not state["items"].get(mid, {}).get("calendar_event_created"):
                 ok = U.calendar_add_deadline(
-                    f"📧 {item['subject'][:80]}", item["due_date"], item["due_time"],
+                    f"{item['subject'][:80]}", item["due_date"], item["due_time"],
                     f"Gmail — from {item['from']}", "Gmail university mail",
                     dry_run=args.dry_run, tool=TOOL)
                 U.ledger_record(state, mid, calendar_event_created=ok)
@@ -156,7 +157,7 @@ def main():
             if i["due_date"]:
                 print(f"   Due: {U.due_str(i)}")
             if i["attachments"]:
-                print(f"   📎 {', '.join(i['attachments'])}")
+                print(f"   {', '.join(i['attachments'])}")
             print("-" * 60)
 
     U.ledger_prune(state)

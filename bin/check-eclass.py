@@ -237,7 +237,7 @@ def main():
         if not items:
             print(f"No new eClass announcements in the last {args.hours}h")
         for i in items:
-            flag = "🎓" if i["is_grade"] else U.BUCKET_ICON[i["bucket"]]
+            flag = "" if i["is_grade"] else U.BUCKET_ICON[i["bucket"]]
             print(f"{flag} {i['title']}")
             print(f"   Course: {i['course'] or i['course_code']}")
             print(f"   Posted: {i['posted'] or '(unknown)'}")
@@ -271,7 +271,7 @@ def main():
                 continue
             if not args.resend and i["id"] in state["alerted"]:
                 continue
-            tag = "🎓 GRADE" if i["is_grade"] else "🔴 UoA URGENT"
+            tag = "GRADE" if i["is_grade"] else "🔴 UoA URGENT"
             subject = f"{tag}: {i['title']}"
             text = "\n".join([
                 f"Course:  {i['course'] or i['course_code']}",
@@ -306,7 +306,7 @@ def main():
             if not i["due_date"] or (not args.resend and i["id"] in state["calendared"]):
                 continue
             if U.calendar_add_deadline(
-                    f"📚 {i['title']}", i["due_date"], i["due_time"],
+                    f"{i['title']}", i["due_date"], i["due_time"],
                     f"{i['course'] or i['course_code']} — eClass announcement",
                     i["url"], dry_run=args.dry_run, tool=TOOL):
                 state["calendared"][i["id"]] = now_ts

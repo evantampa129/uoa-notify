@@ -205,7 +205,7 @@ def main():
         if args.calendar and f["due_date"]:
             e = state["items"].get(f["id"], {})
             if not e.get("calendar_event_created"):
-                ok = U.calendar_add_deadline(f"📚 {f['title'][:80]}", f["due_date"],
+                ok = U.calendar_add_deadline(f"{f['title'][:80]}", f["due_date"],
                                              f["due_time"], "Eudoxus announcement",
                                              f["url"], dry_run=args.dry_run, tool=TOOL)
                 U.ledger_record(state, f["id"], calendar_event_created=ok)
