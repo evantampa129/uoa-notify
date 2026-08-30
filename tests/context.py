@@ -15,6 +15,14 @@ if BIN not in sys.path:
 
 import uoa_common as U  # noqa: E402  (path must be set before this import)
 
+# Point the library at a config file that cannot exist, for the whole test
+# session. Without this the tests read the developer's own
+# ~/.config/check-uoa-mail/config.ini: results would differ between a laptop
+# and CI, and a test exercising the "nothing configured" path would instead
+# pick up the real assistant CLI and go on to spawn it.
+U.CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "no-such-config.ini")
+
 
 def default_config():
     """A config built only from the in-code defaults.

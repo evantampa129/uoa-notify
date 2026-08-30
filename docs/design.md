@@ -40,6 +40,43 @@ inbox and break the one-tag-one-message mapping.
 Clicking a notification opens the source page (`notify-open.sh`, falling back
 to zenity). One live notification per item, deduplicated by a lockfile.
 
+### Clicking a notification
+
+Activating a desktop notification opens the source page and marks the item
+read. Two details of the freedesktop notification specification decide whether
+that works at all, and both were originally wrong.
+
+Clicking the *body* of a notification does not fire an arbitrary named action.
+It fires the action registered under the reserved key `default`, and nothing
+else. A notification declaring only `--action=open=Open` therefore looks
+clickable and does nothing when clicked, because no handler is bound to the
+body — and GNOME Shell hides named action buttons until the banner is
+expanded, so there is frequently nothing visible to click either.
+`notify-open.sh` registers `default` first, and `open` alongside it for the
+daemons that render a button.
+
+`--action` also implies `--wait`: `notify-send` blocks until the notification
+is activated or closed. GNOME Shell ignores `--expire-time` and keeps the
+notification in its tray indefinitely, so that wait has no natural end. Left
+unbounded, one helper process per unread item survives forever, holding the
+per-item lock that exists to prevent duplicate banners and thereby silencing
+that item permanently. Every blocking call is wrapped in `timeout`, and the
+lock is only honoured while the process holding it is verifiably still a live
+helper.
+
+Then the read-back, which has to satisfy both directions of the sync:
+
+    click → xdg-open the source page
+          → ledger read = true          stops the desktop alert immediately
+          → Gmail UNREAD label removed  makes it stick on every other device
+
+The local flag alone would not survive. Gmail is the declared source of truth,
+so the next `sync-read-status.py` run would see the message still unread, flip
+the ledger back, reset `notify_count` and start alerting again. The push is
+therefore attempted straight away and recorded as `read_push_pending` when it
+cannot be made, and `apply_state` treats Gmail's verdict as stale rather than
+authoritative while a push is owed — retrying it instead of undoing the click.
+
 ### Two loops that had to be broken
 
 **The echo loop.** Notifications are forwarded into Gmail, and
@@ -94,24 +131,64 @@ is genuinely still unread. Edit with `crontab -e`; the source lives in
 
 ## MCP access from cron
 
-The scripts reach Gmail, Calendar, Trello and Drive by shelling out to
-`claude -p` with a restricted `--allowedTools` list (`U.mcp_ask` /
-`U.mcp_json`). This works from cron's minimal environment because the CLI reads
-its own credentials from `~/.claude`. Every MCP call is best-effort: on
-timeout, missing CLI or no network it returns `None` and the caller carries on
-with local data, so nothing ever hard-fails offline.
+The scripts reach Gmail, Calendar, Trello and Drive over MCP, by handing a
+single-shot prompt to an assistant CLI that already holds the OAuth grants for
+those accounts (`U.mcp_ask` / `U.mcp_json`, and `mcp_ask` in `uoa-lib.sh`).
+Each call is restricted to an explicit tool list, so a connector is never
+reachable beyond what that step needs.
+
+Which CLI, and the prefix its connector tool ids carry, are configuration and
+not constants:
+
+    [agent]
+    cli        = <command on PATH>
+    mcp_prefix = <tool-id prefix>
+
+read from `~/.config/check-uoa-mail/config.ini` or from `UOA_AGENT_CLI` and
+`UOA_MCP_PREFIX`. Both are blank in the repository, so no vendor is baked into
+the source and the backend can be swapped without touching a script.
+
+Every MCP call is best-effort. On a missing or unconfigured CLI, a timeout or
+no network it returns `None`, and the caller carries on with local data; the
+notifications, deadline parsing, ledger and local briefs never depend on it.
 
 `notify-send` needs a desktop session, which cron does not have;
 `U.desktop_env()` fills in `DISPLAY` and `DBUS_SESSION_BUS_ADDRESS`.
 
 ## Credentials
 
-    ~/.uoa-mail-creds    line 1 username, line 2 password, optional line 3 SMTP password
-    ~/.eudoxus-creds     same format; absent → Eudoxus checks public pages only
-    ~/.watch-urls        optional extra pages for check-department.py
+Credentials live in `~/.local/share/uoa-notify/credentials`, a directory
+created mode 700 so that neither the secrets nor their names are readable by
+another account. `bin/uoa-credentials.sh` manages it.
 
-All `chmod 600`. Nothing is hardcoded; a file with placeholder values is
-rejected.
+Four backends are tried in order, strongest first, and each may fail quietly
+so that a locked store degrades to the next rather than taking a cron cycle
+down with it:
+
+| Backend | Storage | Unattended |
+|---|---|---|
+| keepass | KDBX4 database, AES-256 + Argon2, read with `keepassxc-cli` | yes, unlocked by a key file rather than a passphrase |
+| keyring | login keyring via `secret-tool` | yes, while the session keyring is unlocked |
+| gpg | GPG-encrypted file, decrypted by `gpg-agent` | only while the agent holds the passphrase |
+| file | plain file, mode 600 | yes |
+
+    uoa-credentials.sh status     where each secret currently lives
+    uoa-credentials.sh store      store one, prompting without echo
+    uoa-credentials.sh migrate    move the legacy dotfiles in and shred them
+
+Legacy paths are still read when nothing is stored: `~/.uoa-mail-creds` (line 1
+username, line 2 password, optional line 3 SMTP password) and `~/.eudoxus-creds`
+in the same format; absent → Eudoxus checks public pages only. `~/.watch-urls`
+holds optional extra pages for `check-department.py`.
+
+Nothing is hardcoded, and a file still holding placeholder values is rejected.
+
+What the encryption does and does not buy is worth stating plainly, because it
+invites the wrong assumption: whatever an unattended cron job can decrypt with
+nobody present, an attacker who already controls this account can decrypt too.
+The protection is against the realistic accidents — a dotfile swept into a
+backup, a synchronised home directory, an accidental commit, a stray `chmod`
+that widens the mode — not against a local attacker who is already you.
 
 ## Greek deadline parsing
 
@@ -130,8 +207,8 @@ due date.
   one deadline with different titles. Deduping across sources would need
   fuzzy title matching, which risks silently dropping genuinely different
   deadlines that fall on the same day.
-- **Eudoxus** currently checks public pages only — add `~/.eudoxus-creds` to
-  enable the logged-in checks.
+- **Eudoxus** currently checks public pages only — run
+  `uoa-credentials.sh store eudoxus` to enable the logged-in checks.
 - The morning brief takes two to four minutes because it runs every checker
   and several MCP queries; that is fine at 07:30 but slow to run by hand.
 
