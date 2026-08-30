@@ -18,6 +18,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import time
 import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
@@ -580,6 +581,77 @@ NOTIFY_OPEN = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "notify-open.sh")
 
 
+# ------------------------------------------------------- notification daemon
+#
+# Clickable notifications are handed to uoa-notifyd.py rather than posted
+# directly. The reason is that a notification outlives the process that posts
+# it: GNOME keeps it in its tray indefinitely, so a short-lived helper leaves
+# a banner behind that still looks clickable and has nobody left listening.
+# One long-lived daemon subscribes to ActionInvoked once and stays reachable
+# for every notification it has ever posted.
+#
+# Every failure here falls back to notify-open.sh and then to a plain
+# notify-send, so a missing daemon degrades the click, never the alert.
+
+NOTIFYD = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "uoa-notifyd.py")
+
+
+def notifyd_socket():
+    base = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    return os.path.join(base, "uoa-notify", "notifyd.sock")
+
+
+def notifyd_request(payload, timeout=5):
+    """Send one request to the daemon. Returns the reply, or None."""
+    import socket as _socket
+    path = notifyd_socket()
+    if not os.path.exists(path):
+        return None
+    try:
+        with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            sock.connect(path)
+            sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+            data = sock.recv(4096)
+        return json.loads(data.decode("utf-8") or "{}")
+    except (OSError, ValueError):
+        return None
+
+
+def notifyd_start(tool="notify"):
+    """Start the daemon if it is not already answering. Returns True if up."""
+    if notifyd_request({"command": "ping"}):
+        return True
+    if not os.access(NOTIFYD, os.X_OK):
+        return False
+    try:
+        subprocess.Popen([NOTIFYD], env=desktop_env(),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError as exc:
+        log(tool, "warn", f"cannot start the notification daemon: {exc}")
+        return False
+    # Give it a moment to bind the socket before the first request.
+    for _ in range(20):
+        time.sleep(0.1)
+        if notifyd_request({"command": "ping"}):
+            return True
+    log(tool, "warn", "notification daemon did not come up")
+    return False
+
+
+def notifyd_send(title, body, urgency, url, tag, source, message_id,
+                 tool="notify"):
+    """Post through the daemon. False means "fall back to the old path"."""
+    if not notifyd_start(tool):
+        return False
+    reply = notifyd_request({"title": title, "body": body, "urgency": urgency,
+                             "url": url, "tag": tag, "source": source,
+                             "message_id": message_id})
+    return bool(reply and reply.get("ok"))
+
+
 def notify_send(title, body, urgency="normal", tool="notify", url="",
                 icon="mail-unread", tag="", source="", message_id=""):
     """Desktop notification.
@@ -591,6 +663,10 @@ def notify_send(title, body, urgency="normal", tool="notify", url="",
     helper is running, not when the user answers.
     """
     env = desktop_env()
+    if url or tag or message_id:
+        if notifyd_send(title, body, urgency, url, tag, source, message_id,
+                        tool=tool):
+            return True
     if (url or tag or message_id) and os.access(NOTIFY_OPEN, os.X_OK):
         try:
             subprocess.Popen([NOTIFY_OPEN, title, body, urgency, url,

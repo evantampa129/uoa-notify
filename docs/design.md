@@ -52,17 +52,35 @@ else. A notification declaring only `--action=open=Open` therefore looks
 clickable and does nothing when clicked, because no handler is bound to the
 body — and GNOME Shell hides named action buttons until the banner is
 expanded, so there is frequently nothing visible to click either.
-`notify-open.sh` registers `default` first, and `open` alongside it for the
-daemons that render a button.
+Both `notify-open.sh` and the daemon register `default` first, with `open`
+alongside it for the servers that render a button.
 
 `--action` also implies `--wait`: `notify-send` blocks until the notification
 is activated or closed. GNOME Shell ignores `--expire-time` and keeps the
 notification in its tray indefinitely, so that wait has no natural end. Left
 unbounded, one helper process per unread item survives forever, holding the
 per-item lock that exists to prevent duplicate banners and thereby silencing
-that item permanently. Every blocking call is wrapped in `timeout`, and the
-lock is only honoured while the process holding it is verifiably still a live
-helper.
+that item permanently. Measured before the fix: 97 live helpers, the oldest
+fourteen hours old.
+
+Bounding the wait fixes the leak and uncovers the real problem, which is that
+**a notification outlives the process that posted it**. GNOME keeps it in the
+tray after the helper has exited, so the banner is still there, still looks
+clickable, and nothing is listening any more. Clicking does nothing, silently,
+for as long as the notification sits there.
+
+`uoa-notifyd.py` removes that failure mode. `ActionInvoked` is broadcast on
+the session bus and carries the notification's own id, so one long-lived
+process can subscribe once, keep a map of id to target, and act on a click
+regardless of which process posted the notification or how long ago. Requests
+arrive on a Unix socket in `$XDG_RUNTIME_DIR/uoa-notify/`; a repeat for the
+same tag reuses the previous notification id, which replaces the banner in
+place and makes the old per-item lock file unnecessary.
+
+The daemon starts on demand from the first notification of a cycle and exits
+after six idle hours. Without `python3-gi` it cannot run, and `notify_send`
+falls back to `notify-open.sh` and then to a plain notification: the click
+degrades, the alert does not.
 
 Then the read-back, which has to satisfy both directions of the sync:
 

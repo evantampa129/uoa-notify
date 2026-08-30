@@ -51,7 +51,7 @@ Version: 1.0.0
                           |       |        |
             +-------------+       |        +-------------+
             v                     v                      v
-     notify-open.sh        forward once to        ~/.local/log/
+     uoa-notifyd.py        forward once to        ~/.local/log/
      desktop banner        the phone address      notifications.log
      click -> open page    [XXX-MSG-xxxxxxxx]
      click -> mark read           |
@@ -129,17 +129,40 @@ dragged back to unread.
 Activating a notification opens the source page and marks the item read, in
 that order and without the browser waiting on the network.
 
+Getting that to work took three fixes, because a notification is harder to
+make clickable than it looks.
+
 Clicking the *body* of a notification fires the action registered under the
 reserved key `default` and nothing else, so a notification declaring only a
-named action looks clickable and does nothing. GNOME Shell compounds this by
-hiding named action buttons until the banner is expanded. `notify-open.sh`
-registers `default`, and a visible button alongside it for the daemons that
-render one.
+named action looks clickable and does nothing at all. GNOME Shell compounds
+this by hiding named action buttons until the banner is expanded, so there is
+often nothing visible to click either.
 
-`--action` also implies `--wait`, and GNOME Shell ignores `--expire-time`, so
-an unbounded helper survives forever holding the per-item lock and silently
-stopping every later alert for that item. Every blocking call is bounded, and
-a lock is honoured only while a live helper verifiably holds it.
+`notify-send --action` also implies `--wait`, and GNOME Shell ignores
+`--expire-time`, so the process blocks forever. Measured in practice: 97 live
+helper processes, the oldest fourteen hours old, each holding the per-item
+lock that then silenced its own item permanently.
+
+Bounding that wait fixes the leak and exposes the real problem. **A
+notification outlives the process that posted it.** GNOME keeps it in the tray
+after the helper exits, so the banner is still there, still looks clickable,
+and the connection that would have received the click is gone. That is why
+`uoa-notifyd.py` exists: `ActionInvoked` is broadcast on the session bus with
+the notification's own id, so one long-lived daemon subscribes once and stays
+reachable for every notification it has ever posted, however long ago.
+
+    checker -> notify.py -> notifyd (unix socket) -> Notify()  ->  GNOME
+                                    ^                                |
+                                    +---------- ActionInvoked -------+
+                                    |
+                                    +-> xdg-open the page
+                                    +-> notify.py --mark-read (out of process)
+
+The daemon starts on demand from the first notification of a cron cycle and
+exits after six idle hours, so there is no service file to manage. If it
+cannot start — no `python3-gi` — the older `notify-open.sh` helper is used
+instead, and a plain notification after that. The click degrades; the alert
+never does.
 
 ### Deadlines become things you can act on
 
@@ -185,6 +208,7 @@ and beautifulsoup4 are imported lazily by the scrapers that need them.
 - Python 3.8 or newer
 - `requests` and `beautifulsoup4`
 - `notify-send`, `xdg-open`; `zenity` optional as a fallback
+- `python3-gi` for clickable notifications; without it clicks are unreliable
 - A UoA account, used for webmail and eClass alike
 - Optional: `keepassxc-cli` for encrypted credential storage
 - Optional: an assistant CLI on `PATH` for the Gmail, Calendar, Drive and
@@ -301,7 +325,8 @@ notify.py --renotify-unread --source eclass
 |---|---|
 | `uoa_common.py` | Shared core: config, credentials, logging, SMTP, Greek parsing, ledger, MCP bridge |
 | `notify.py` | Central hub. Desktop notification, forward, log, ledger, read-back |
-| `notify-open.sh` | Clickable notification helper. Opens the page, marks it read |
+| `uoa-notifyd.py` | Notification daemon. Keeps every notification clickable, opens the page and records the read |
+| `notify-open.sh` | Fallback notification helper, used when the daemon cannot run |
 | `check-uoa-mail.py` | UoA IMAP mailbox |
 | `check-eclass.py` | eClass announcements, assignments, files and grades |
 | `check-eudoxus.py` | Textbook periods and deadlines |
@@ -342,9 +367,9 @@ only what is genuinely still unread.
 python3 -m unittest discover -s tests -t tests
 ```
 
-58 tests, no credentials, no network and no third-party packages. They cover
-the Greek classifier, subject-tag generation, the configurable MCP backend and
-the click-to-read chain. Continuous integration runs them on Python 3.8 and
+66 tests, no credentials, no network and no third-party packages. They cover
+the Greek classifier, subject-tag generation, the configurable MCP backend,
+the notification daemon and the click-to-read chain. Continuous integration runs them on Python 3.8 and
 3.12 and parses every shell script.
 
 Two historical bugs are pinned by name, because both were silent: `εργασία`

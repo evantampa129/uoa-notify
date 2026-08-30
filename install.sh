@@ -43,7 +43,9 @@ if [ "$MODE" = uninstall ]; then
     else
         warn "no crontab entries found"
     fi
+    "$BIN/uoa-notifyd.py" --stop >/dev/null 2>&1 && ok "daemon stopped"
     for f in "$SRC"/bin/*; do rm -f "$BIN/$(basename "$f")"; done
+    rm -f "$HOME/.local/share/applications/uoa-notify.desktop"
     ok "scripts removed from $BIN"
     warn "left alone: $CFG_DIR, $STATE_DIR, $LOG_DIR and your credential files"
     exit 0
@@ -105,6 +107,36 @@ ok "directories ready"
 
 install -m 755 "$SRC"/bin/*.py "$SRC"/bin/*.sh "$BIN"/ && ok "scripts installed to $BIN"
 chmod 644 "$BIN/uoa_common.py"          # imported, not executed
+
+# A desktop entry lets GNOME group every notification under one application
+# instead of showing each as an unrelated stray, and gives the daemon an
+# identity to put in the desktop-entry hint.
+APPS="$HOME/.local/share/applications"
+mkdir -p "$APPS"
+cat > "$APPS/uoa-notify.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=UoA Notify
+Comment=Academic notifications for the University of Athens
+Exec=xdg-open %u
+Icon=mail-unread
+Terminal=false
+NoDisplay=true
+StartupNotify=false
+DESKTOP
+update-desktop-database "$APPS" >/dev/null 2>&1 || true
+ok "desktop entry installed"
+
+# The daemon is what keeps notifications clickable after the process that
+# posted them has exited; without pygobject it cannot run and clicks fall
+# back to the older, more fragile helper.
+if python3 -c "import gi" 2>/dev/null ||
+   PYTHONPATH=/usr/lib/python3/dist-packages python3 -c "import gi" 2>/dev/null; then
+    ok "python3-gi (clickable notifications)"
+else
+    warn "python3-gi missing — clicking a notification will often do nothing"
+    warn "  install it with: sudo apt install python3-gi"
+fi
 
 if [ ! -f "$CFG" ]; then
     install -m 600 "$SRC/examples/config.ini.example" "$CFG"
