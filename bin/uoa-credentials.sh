@@ -100,13 +100,13 @@ cmd_status() {
     printf 'Secrets:\n'
     for name in uoa-mail eudoxus; do
         local where="not stored"
-        if have keepassxc-cli && [ -f "$KDBX" ] && [ -f "$KEYFILE" ] &&
-           keepassxc-cli show --quiet --key-file "$KEYFILE" --no-password \
-               -a UserName "$KDBX" "$name" >/dev/null 2>&1; then
-            where="keepass $(printf '%s' "$KDBX" | sed "s|$HOME|~|") (encrypted)"
-        elif have secret-tool &&
+        if have secret-tool &&
            secret-tool lookup service "$SERVICE" account "$name" >/dev/null 2>&1; then
             where="keyring (encrypted)"
+        elif have keepassxc-cli && [ -f "$KDBX" ] && [ -f "$KEYFILE" ] &&
+           keepassxc-cli show --quiet --key-file "$KEYFILE" --no-password \
+               -a UserName "$KDBX" "$name" >/dev/null 2>&1; then
+            where="keepass $KDBX (encrypted)"
         elif [ -f "$STORE/$name.gpg" ]; then
             where="gpg  $STORE/$name.gpg (encrypted)"
         elif [ -f "$STORE/$name" ]; then
