@@ -559,21 +559,75 @@ def due_str(item):
 
 # ------------------------------------------------------------------- notify
 
+# Variables that a graphical session needs and that cron, and any process
+# started from a stripped environment, does not have. DISPLAY and DBUS are
+# enough to *post* a notification, which is why their absence went unnoticed;
+# opening a URL needs more. Without XDG_DATA_DIRS and XDG_CURRENT_DESKTOP,
+# xdg-open cannot find the .desktop files that say which browser to use, and
+# it fails without printing anything.
+SESSION_VARS = ("XDG_DATA_DIRS", "XDG_CONFIG_DIRS", "XDG_CURRENT_DESKTOP",
+                "XDG_SESSION_TYPE", "DESKTOP_SESSION", "WAYLAND_DISPLAY",
+                "GDMSESSION", "GNOME_SETUP_DISPLAY", "PATH")
+
+# Processes to harvest that environment from, most authoritative first.
+SESSION_PROCS = ("gnome-shell", "gnome-session-binary", "systemd")
+
+
+def _harvest_session_env():
+    """Read the live session's environment out of /proc.
+
+    Reconstructing these by hand would mean guessing at distribution-specific
+    values (Ubuntu puts flatpak and snap directories on XDG_DATA_DIRS); asking
+    the session process what it actually has is exact.
+    """
+    found = {}
+    for name in SESSION_PROCS:
+        try:
+            out = subprocess.run(["pgrep", "-x", name], capture_output=True,
+                                 text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        for pid in (out.stdout or "").split():
+            try:
+                with open(f"/proc/{pid}/environ", "rb") as fh:
+                    raw = fh.read()
+            except OSError:
+                continue
+            for item in raw.split(b"\0"):
+                if b"=" not in item:
+                    continue
+                key, _, value = item.decode("utf-8", "replace").partition("=")
+                if key in SESSION_VARS and key not in found:
+                    found[key] = value
+            if found:
+                return found
+    return found
+
+
+_SESSION_ENV_CACHE = None
+
+
 def desktop_env():
-    """Environment able to reach the logged-in desktop.
+    """Environment able to reach the logged-in desktop and open a URL.
 
     cron starts with no DISPLAY and no DBUS_SESSION_BUS_ADDRESS, so
-    notify-send would fail silently. Fill both in from the running session
-    when they are missing.
+    notify-send would fail silently; those two are filled in first because
+    without them nothing appears at all. The session variables matter for the
+    step after that — actually opening the page a notification points at.
     """
+    global _SESSION_ENV_CACHE
     env = dict(os.environ)
     env.setdefault("DISPLAY", ":0")
+    runtime = env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    env.setdefault("XDG_RUNTIME_DIR", runtime)
     if "DBUS_SESSION_BUS_ADDRESS" not in env:
-        runtime = env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
         bus = os.path.join(runtime, "bus")
         if os.path.exists(bus):
             env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus}"
-        env.setdefault("XDG_RUNTIME_DIR", runtime)
+    if _SESSION_ENV_CACHE is None:
+        _SESSION_ENV_CACHE = _harvest_session_env()
+    for key, value in _SESSION_ENV_CACHE.items():
+        env.setdefault(key, value)
     return env
 
 
@@ -1467,6 +1521,67 @@ def recently_forwarded(entry, minutes=FORCE_UNREAD_WINDOW_MIN):
         when = when.replace(tzinfo=timezone.utc)
     age = (datetime.now(timezone.utc) - when).total_seconds() / 60.0
     return 0 <= age <= minutes
+
+
+def webmail_mark_seen(rfc_message_id, tool="webmail-read"):
+    """Set the \\Seen flag on one message in the UoA mailbox over IMAP.
+
+    Reading a notification on the desktop should leave the mailbox in the
+    state the user expects to find it in, not just the Gmail copy: opening the
+    item here and still seeing it bold in webmail is the same
+    "I already dealt with this" confusion the whole read-tracking exists to
+    remove.
+
+    The ledger stores the RFC 822 Message-ID, which is stable and searchable,
+    so no IMAP UID has to be remembered across runs. Returns True on success;
+    every failure is logged and swallowed, because a mailbox that cannot be
+    reached must never take a notification click down with it.
+    """
+    import imaplib
+
+    if not rfc_message_id or not rfc_message_id.startswith("<"):
+        return False
+    cfg = load_config()
+    host, port = cfg["imap"]["host"], cfg.getint("imap", "port")
+    try:
+        user, password, _ = read_credentials(tool)
+    except SystemExit:
+        log(tool, "warn", "no credentials; cannot mark the mailbox copy read")
+        return False
+
+    conn = None
+    try:
+        conn = imaplib.IMAP4_SSL(host, port,
+                                 timeout=cfg.getint("imap", "timeout"))
+        conn.login(user, password)
+        # Writable: the whole point is to change a flag.
+        if conn.select(cfg["imap"]["mailbox"])[0] != "OK":
+            log(tool, "warn", f"cannot open mailbox {cfg['imap']['mailbox']}")
+            return False
+        typ, data = conn.search(None, "HEADER", "Message-ID", rfc_message_id)
+        if typ != "OK" or not data or not data[0].split():
+            log(tool, "info",
+                f"{rfc_message_id} is no longer in the mailbox; nothing to mark")
+            return False
+        uids = data[0].split()
+        for uid in uids:
+            conn.store(uid, "+FLAGS", "\\Seen")
+        log(tool, "info",
+            f"marked {len(uids)} mailbox message(s) seen for {rfc_message_id}")
+        return True
+    except (OSError, imaplib.IMAP4.error) as exc:
+        log(tool, "warn", f"cannot mark {rfc_message_id} seen over IMAP: {exc}")
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except (OSError, imaplib.IMAP4.error):
+                pass
+            try:
+                conn.logout()
+            except (OSError, imaplib.IMAP4.error):
+                pass
 
 
 def gmail_mark_read(msg_ids, tool="gmail-sync"):

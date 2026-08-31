@@ -276,6 +276,17 @@ def mark_read(source=None, message_id=None, tag=None, dry_run=False):
         U.log(TOOL, "info",
               f"opened and marked read locally: {entry.get('tag')} "
               f"(Gmail push pending)")
+
+    # The mailbox copy too, for items that came from the UoA mailbox. Reading
+    # the notification and then finding the mail still bold in webmail is
+    # exactly the confusion this system exists to remove. Best effort and
+    # recorded separately, because IMAP being unreachable is not a reason to
+    # undo a read the user just performed.
+    if source == "webmail" and not entry.get("webmail_seen"):
+        if U.webmail_mark_seen(entry.get("message_id", ""), tool=TOOL):
+            entry["webmail_seen"] = True
+            entry["webmail_seen_at"] = now
+            U.ledger_save(source, state)
     return True
 
 

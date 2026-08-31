@@ -84,6 +84,27 @@ BUS_PATH = "/org/freedesktop/Notifications"
 # outlive a session or need a service file to be tidy.
 IDLE_EXIT_SECONDS = 6 * 3600
 
+# How often to pull read state back from Gmail. cron does this every fifteen
+# minutes, which is as fine-grained as cron gets and still means a mail read
+# on the phone can keep nagging on the laptop for a quarter of an hour. The
+# daemon is already resident, so it can close that gap for free.
+#
+# Two minutes is a deliberate floor rather than a maximum: each pass is an
+# assistant CLI round trip, so a much shorter interval would spend more time
+# syncing than not, for a difference nobody perceives.
+SYNC_INTERVAL_SECONDS = 120
+
+
+def adopt_session_env():
+    """Put the live session's variables into this process's environment.
+
+    GIO reads XDG_DATA_DIRS from the real environment, not from an env dict
+    handed to a subprocess, so passing them along at launch time is not
+    enough: the daemon itself has to hold them.
+    """
+    for key, value in U.desktop_env().items():
+        os.environ.setdefault(key, value)
+
 
 def runtime_dir():
     """Resolved by uoa_common so the daemon and its clients always agree.
@@ -111,6 +132,7 @@ class Daemon:
         self.by_tag = {}
         self.lock = threading.Lock()
         self.last_activity = time.time()
+        self.sync_proc = None
         self.bus.signal_subscribe(None, BUS_NAME, None, BUS_PATH, None,
                                   Gio.DBusSignalFlags.NONE, self._on_signal)
 
@@ -202,17 +224,48 @@ class Daemon:
                 self.by_tag.pop(item["tag"], None)
 
     def _open(self, item):
+        """Open the page, and report success only when it actually opened.
+
+        The first version called xdg-open, discarded its output and logged
+        success unconditionally. That produced a log line claiming the page
+        had opened while nothing happened on screen: xdg-open needs
+        XDG_DATA_DIRS and XDG_CURRENT_DESKTOP to work out which browser to
+        use, had neither, and failed without printing anything. Two lessons
+        are encoded here — try the session's own launcher first, and never
+        report success without checking.
+        """
         url = item.get("url")
         if not url:
-            return
+            return False
+
+        # 1. GIO's default handler: the same lookup the desktop itself does,
+        # performed in process, so it depends on neither PATH nor a helper.
         try:
-            subprocess.Popen(["xdg-open", url], start_new_session=True,
-                             stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL)
-            U.log(TOOL, "info", f"opened {url}")
-        except OSError as exc:
-            U.log(TOOL, "warn", f"cannot open {url}: {exc}")
+            if Gio.AppInfo.launch_default_for_uri(url, None):
+                log(TOOL, "info", f"opened {url}")
+                return True
+            log(TOOL, "warn", "GIO reported no default handler")
+        except GLib.Error as exc:
+            log(TOOL, "warn", f"GIO could not open {url}: {exc.message}")
+
+        # 2. External launchers, best-behaved on GNOME first.
+        env = U.desktop_env()
+        for cmd in (["gio", "open", url], ["xdg-open", url]):
+            try:
+                r = subprocess.run(cmd, env=env, timeout=20,
+                                   stdin=subprocess.DEVNULL,
+                                   capture_output=True, text=True)
+            except (OSError, subprocess.SubprocessError) as exc:
+                log(TOOL, "warn", f"{cmd[0]} failed: {exc}")
+                continue
+            if r.returncode == 0:
+                log(TOOL, "info", f"opened {url} with {cmd[0]}")
+                return True
+            log(TOOL, "warn", f"{cmd[0]} exited {r.returncode}: "
+                              f"{(r.stderr or '').strip()[:200]}")
+
+        log(TOOL, "error", f"could not open {url} by any method")
+        return False
 
     def _mark_read(self, item):
         """Record the read out of process, so the click returns immediately.
@@ -274,6 +327,34 @@ class Daemon:
                 except OSError:
                     pass
 
+    # ------------------------------------------------------------ auto sync
+
+    def _sync_tick(self):
+        """Pull Gmail's read state onto the ledger, in the background.
+
+        Runs out of process for the same reason the read push does: it is a
+        network round trip, and blocking the main loop on it would freeze
+        every notification for its duration.
+
+        Overlapping runs are skipped rather than queued. A pass that is still
+        going when the next tick fires means the network is slow, and starting
+        a second one would only make that worse.
+        """
+        if self.sync_proc is not None and self.sync_proc.poll() is None:
+            return True
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "sync-read-status.py")
+        if not os.access(script, os.X_OK):
+            return True
+        try:
+            self.sync_proc = subprocess.Popen(
+                [script, "--quiet"], env=U.desktop_env(),
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError as exc:
+            log(TOOL, "warn", f"cannot start read sync: {exc}")
+        return True
+
     def _idle_check(self):
         if time.time() - self.last_activity > IDLE_EXIT_SECONDS:
             U.log(TOOL, "info", "idle; exiting")
@@ -301,6 +382,10 @@ class Daemon:
 
         threading.Thread(target=self.serve, args=(server,), daemon=True).start()
         GLib.timeout_add_seconds(300, self._idle_check)
+        if "--no-sync" not in sys.argv:
+            GLib.timeout_add_seconds(SYNC_INTERVAL_SECONDS, self._sync_tick)
+            U.log(TOOL, "info",
+                  f"auto-sync every {SYNC_INTERVAL_SECONDS}s")
         U.log(TOOL, "info", f"listening on {path}")
         try:
             self.loop.run()
@@ -346,6 +431,7 @@ def self_test():
         pass
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    adopt_session_env()
     url = "https://www.di.uoa.gr/announcements/3156"
 
     print("1. daemon reachable on the socket the client uses")
@@ -418,6 +504,7 @@ def main():
     if single_instance():
         U.log(TOOL, "info", "already running; nothing to do")
         return 0
+    adopt_session_env()
     Daemon().run()
     return 0
 

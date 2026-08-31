@@ -120,3 +120,31 @@ class TestDaemonContract(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAutoSync(unittest.TestCase):
+    """The daemon closes the gap cron cannot: read state within ~2 minutes."""
+
+    def setUp(self):
+        with open(os.path.join(BIN, "uoa-notifyd.py"), encoding="utf-8") as fh:
+            self.text = fh.read()
+
+    def test_interval_is_short_but_not_absurd(self):
+        """Short enough to feel immediate, long enough not to thrash."""
+        import re
+        m = re.search(r"SYNC_INTERVAL_SECONDS = (\d+)", self.text)
+        self.assertIsNotNone(m)
+        self.assertTrue(60 <= int(m.group(1)) <= 300)
+
+    def test_sync_runs_out_of_process(self):
+        """A network call on the main loop would freeze every notification."""
+        tick = self.text[self.text.index("def _sync_tick"):]
+        self.assertIn("subprocess.Popen", tick)
+        self.assertIn("start_new_session=True", tick)
+
+    def test_overlapping_runs_are_skipped(self):
+        tick = self.text[self.text.index("def _sync_tick"):]
+        self.assertIn("self.sync_proc.poll() is None", tick)
+
+    def test_auto_sync_can_be_turned_off(self):
+        self.assertIn('"--no-sync" not in sys.argv', self.text)
