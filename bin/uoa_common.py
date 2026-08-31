@@ -202,13 +202,13 @@ def load_config():
 # them are optional: with none set up the system behaves exactly as it always
 # has, reading the plain mode-600 dotfile.
 #
-#   1. a KeePassXC database (KDBX4, AES-256 + Argon2) under CREDS_DIR, read
-#      with keepassxc-cli. Unlocked by a key file rather than a passphrase so
-#      cron can open it unattended, and the same database can be opened in
-#      the KeePassXC desktop app. Preferred when keepassxc-cli is installed.
-#   2. the login keyring, via `secret-tool` (package: libsecret-tools).
+#   1. the login keyring, via `secret-tool` (package: libsecret-tools).
 #      Encrypted at rest, unlocked once by the login password, and readable
 #      by cron jobs running in the same desktop session.
+#   2. a KeePassXC database (KDBX4, AES-256 + Argon2) under CREDS_DIR, read
+#      with keepassxc-cli. Unlocked by a key file rather than a passphrase so
+#      cron can open it unattended, and the same database can be opened in
+#      the KeePassXC desktop app.
 #   3. a GPG-encrypted file under CREDS_DIR, decrypted through gpg-agent.
 #      Unattended runs succeed while the agent still holds the passphrase; an
 #      expired cache degrades to a warning and the next backend, never to a
@@ -341,7 +341,7 @@ def credential_lines(name, legacy_path, tool="creds"):
     fail quietly, so a locked keyring or an expired gpg-agent falls back
     instead of taking the whole cron cycle down with it.
     """
-    for backend in (_from_keepassxc, _from_keyring, _from_gpg):
+    for backend in (_from_keyring, _from_keepassxc, _from_gpg):
         text = backend(name, tool)
         if text:
             break

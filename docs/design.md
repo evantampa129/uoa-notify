@@ -185,8 +185,8 @@ down with it:
 
 | Backend | Storage | Unattended |
 |---|---|---|
-| keepass | KDBX4 database, AES-256 + Argon2, read with `keepassxc-cli` | yes, unlocked by a key file rather than a passphrase |
 | keyring | login keyring via `secret-tool` | yes, while the session keyring is unlocked |
+| keepass | KDBX4 database, AES-256 + Argon2, read with `keepassxc-cli` | yes, unlocked by a key file rather than a passphrase |
 | gpg | GPG-encrypted file, decrypted by `gpg-agent` | only while the agent holds the passphrase |
 | file | plain file, mode 600 | yes |
 

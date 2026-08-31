@@ -40,7 +40,7 @@ Version: 1.0.0
    |                           -> date near keyword -> urgency bucket     |
    |   Ledger                  per-source JSON: notified / forwarded /    |
    |                           read / gmail_msg_id / calendar_created     |
-   |   Credentials             keepass -> keyring -> gpg -> file          |
+   |   Credentials             keyring -> keepass -> gpg -> file          |
    |   MCP bridge              configured CLI, explicit tool allow-list   |
    +---------------------------------------------------------------------+
                                   |
@@ -255,8 +255,8 @@ quietly so a locked store falls through rather than taking a cron cycle down:
 
 | Backend | Storage | Unattended |
 |---|---|---|
-| keepass | KDBX4 database, AES-256 + Argon2, via `keepassxc-cli` | Yes, unlocked by a key file rather than a passphrase |
 | keyring | Login keyring via `secret-tool` | Yes, while the session keyring is unlocked |
+| keepass | KDBX4 database, AES-256 + Argon2, via `keepassxc-cli` | Yes, unlocked by a key file rather than a passphrase |
 | gpg | GPG-encrypted file, decrypted by `gpg-agent` | Only while the agent holds the passphrase |
 | file | Plain file, mode 600 | Yes |
 

@@ -13,12 +13,12 @@
 # Backends, strongest first — the reader in uoa_common.py tries them in the
 # same order:
 #
-#   keepass  a KeePassXC database (KDBX4, AES-256 + Argon2) unlocked by a key
-#            file rather than a passphrase, so cron can open it unattended.
-#            The same database opens in the KeePassXC desktop app.
 #   keyring  login keyring via secret-tool. Encrypted at rest, unlocked by
 #            the login password, readable by cron in the same session.
 #            Install with: sudo apt install libsecret-tools
+#   keepass  a KeePassXC database (KDBX4, AES-256 + Argon2) unlocked by a key
+#            file rather than a passphrase, so cron can open it unattended.
+#            The same database opens in the KeePassXC desktop app.
 #   gpg      GPG-encrypted file in the store, decrypted by gpg-agent. Works
 #            unattended only while the agent still holds the passphrase.
 #   file     plain file, mode 600, in a mode-700 directory. The fallback.
@@ -48,8 +48,8 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # UOA_CRED_BACKEND. Reported so the user always knows what they just used.
 choose_backend() {
     if [ -n "${UOA_CRED_BACKEND:-}" ]; then printf '%s' "$UOA_CRED_BACKEND"; return; fi
-    if have keepassxc-cli; then printf 'keepass'
-    elif have secret-tool; then printf 'keyring'
+    if have secret-tool; then printf 'keyring'
+    elif have keepassxc-cli; then printf 'keepass'
     elif have gpg && [ -n "$(gpg --list-secret-keys 2>/dev/null)" ]; then
         printf 'gpg'
     else printf 'file'; fi
