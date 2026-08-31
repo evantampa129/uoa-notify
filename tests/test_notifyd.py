@@ -16,14 +16,19 @@ BIN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                    "bin")
 
 
-class TestDaemonRequests(unittest.TestCase):
-    """Nothing here may raise; a missing daemon is a normal state."""
+class TestSocketPath(unittest.TestCase):
+    """The client and the daemon must resolve the same path, always.
+
+    This is not hypothetical tidiness. cron runs with XDG_RUNTIME_DIR unset
+    and the desktop session runs with it set, so a naive `or "/tmp"` fallback
+    put the cron jobs on /tmp/uoa-notify/notifyd.sock while the daemon that
+    the session had started was listening on /run/user/<uid>/uoa-notify/.
+    They never found each other, every notification silently fell back to the
+    old helper, and the click did nothing.
+    """
 
     def setUp(self):
         self._saved = os.environ.get("XDG_RUNTIME_DIR")
-        # Point at a directory with no socket in it, so the "not running"
-        # branch is what actually gets exercised.
-        os.environ["XDG_RUNTIME_DIR"] = "/nonexistent-runtime-dir"
 
     def tearDown(self):
         if self._saved is None:
@@ -31,12 +36,42 @@ class TestDaemonRequests(unittest.TestCase):
         else:
             os.environ["XDG_RUNTIME_DIR"] = self._saved
 
-    def test_socket_path_is_under_the_runtime_directory(self):
-        self.assertTrue(U.notifyd_socket().startswith("/nonexistent-runtime-dir"))
-        self.assertTrue(U.notifyd_socket().endswith("notifyd.sock"))
+    def test_cron_and_session_agree(self):
+        """Set or unset, the resolved socket path is identical."""
+        os.environ.pop("XDG_RUNTIME_DIR", None)
+        without = U.notifyd_socket()
+        guess = f"/run/user/{os.getuid()}"
+        if os.path.isdir(guess):
+            os.environ["XDG_RUNTIME_DIR"] = guess
+            self.assertEqual(U.notifyd_socket(), without)
+
+    def test_an_unusable_runtime_dir_is_ignored(self):
+        """A stale value pointing nowhere must not win over a real directory."""
+        os.environ["XDG_RUNTIME_DIR"] = "/nonexistent-runtime-dir"
+        self.assertFalse(
+            U.notifyd_socket().startswith("/nonexistent-runtime-dir"))
+
+    def test_path_is_named_consistently(self):
+        self.assertTrue(U.notifyd_socket().endswith("uoa-notify/notifyd.sock"))
+
+
+class TestDaemonRequests(unittest.TestCase):
+    """Nothing here may raise; a missing daemon is a normal state."""
+
+    def setUp(self):
+        self._saved = os.environ.get("XDG_RUNTIME_DIR")
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop("XDG_RUNTIME_DIR", None)
+        else:
+            os.environ["XDG_RUNTIME_DIR"] = self._saved
 
     def test_request_returns_none_when_no_socket_exists(self):
-        self.assertIsNone(U.notifyd_request({"command": "ping"}))
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["XDG_RUNTIME_DIR"] = tmp
+            self.assertIsNone(U.notifyd_request({"command": "ping"}))
 
     def test_request_survives_a_socket_that_is_not_a_socket(self):
         """A stale regular file at the socket path must not raise."""

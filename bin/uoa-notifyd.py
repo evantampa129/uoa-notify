@@ -71,6 +71,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import uoa_common as U  # noqa: E402
 
 TOOL = "notifyd"
+
+
+def log(tool, level, msg):
+    U.log(tool, level, msg)
+
 BUS_NAME = "org.freedesktop.Notifications"
 BUS_PATH = "/org/freedesktop/Notifications"
 
@@ -81,8 +86,13 @@ IDLE_EXIT_SECONDS = 6 * 3600
 
 
 def runtime_dir():
-    base = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
-    path = os.path.join(base, "uoa-notify")
+    """Resolved by uoa_common so the daemon and its clients always agree.
+
+    cron has no XDG_RUNTIME_DIR; the desktop session does. Resolving it
+    independently here is how the daemon ended up listening on one path while
+    the cron jobs looked for it on another.
+    """
+    path = os.path.join(U.runtime_base(), "uoa-notify")
     os.makedirs(path, mode=0o700, exist_ok=True)
     return path
 
@@ -160,6 +170,15 @@ class Daemon:
         with self.lock:
             item = self.items.get(nid)
         if item is None:
+            # A click on a notification this daemon did not post - almost
+            # always one left in the tray by an older helper that has since
+            # exited. Nothing can be done for it, but it is logged: silence
+            # here is what made the original bug so hard to see, because a
+            # click that lands nowhere looks identical to no click at all.
+            if signal == "ActionInvoked":
+                log(TOOL, "info",
+                    f"click on unknown notification id={nid} "
+                    f"action='{args[1]}' - posted before this daemon started")
             return
         if signal == "ActionInvoked":
             self._activate(nid, item, args[1])
@@ -172,7 +191,7 @@ class Daemon:
                     self.by_tag.pop(item["tag"], None)
 
     def _activate(self, nid, item, action):
-        U.log(TOOL, "info", f"action '{action}' on {item['tag'] or nid}")
+        log(TOOL, "info", f"action '{action}' on {item['tag'] or nid}")
         if action == "dismiss":
             return
         self._open(item)
@@ -307,7 +326,79 @@ def single_instance():
         return False
 
 
+def self_test():
+    """Post one notification and report what the click actually did.
+
+    This exists because every part of the chain fails silently. The daemon can
+    be listening on a path the caller never looks at; the notification can be
+    posted without an action bound to its body; the click can be delivered to
+    a connection that has already exited. None of that produces an error
+    anywhere — it produces a banner that does nothing.
+
+    So: post through the real client path, wait for the real signal, and say
+    plainly which link broke.
+    """
+    # Progress has to appear as it happens even when this is piped to a file
+    # or watched by another process, so the caller can see which step stalled.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, OSError):
+        pass
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    url = "https://www.di.uoa.gr/announcements/3156"
+
+    print("1. daemon reachable on the socket the client uses")
+    print(f"   socket: {U.notifyd_socket()}")
+    if not U.notifyd_start(TOOL):
+        print("   FAILED: could not reach or start the daemon")
+        print("   check: python3 -c 'import gi'  (needs python3-gi)")
+        return 1
+    print("   ok")
+
+    print("2. posting a notification through notify_send, as a checker would")
+    posted = U.notify_send(
+        "UoA - SELF TEST", "Click this notification now.", "normal", TOOL,
+        url=url, tag="SELFTEST", source="", message_id="")
+    if not posted:
+        print("   FAILED: notify_send could not post")
+        return 1
+    print("   ok - the notification is on screen and will not expire")
+
+    print("3. waiting up to 120s for your click...")
+    print("   (click the notification body, or its Open button)")
+    deadline = time.time() + 120
+    marker = "action '"
+    log_path = os.path.expanduser("~/.local/log/notifications.log")
+    start_size = os.path.getsize(log_path) if os.path.exists(log_path) else 0
+    while time.time() < deadline:
+        time.sleep(1)
+        if not os.path.exists(log_path):
+            continue
+        with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+            fh.seek(start_size)
+            tail = fh.read()
+        if marker in tail and "SELFTEST" in tail:
+            print("   ok - the click was received")
+            print()
+            print("PASS: the notification chain works end to end.")
+            print(f"      your browser should now be showing {url}")
+            return 0
+    print("   FAILED: no click arrived within 120s")
+    print()
+    print("If you did click, the click is not reaching this process. Check:")
+    print("  - gnome-shell is the notification server:")
+    print("    gdbus call --session --dest org.freedesktop.Notifications \\")
+    print("      --object-path /org/freedesktop/Notifications \\")
+    print("      --method org.freedesktop.Notifications.GetServerInformation")
+    print("  - 'actions' is in its capabilities (GetCapabilities)")
+    print("  - no other notification daemon is running alongside it")
+    return 1
+
+
 def main():
+    if "--self-test" in sys.argv:
+        return self_test()
     if "--status" in sys.argv:
         running = single_instance()
         print(f"running={running} socket={socket_path()}")

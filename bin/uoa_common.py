@@ -597,9 +597,24 @@ NOTIFYD = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        "uoa-notifyd.py")
 
 
+def runtime_base():
+    """The session runtime directory, resolved the same way everywhere.
+
+    cron starts with XDG_RUNTIME_DIR unset, while an interactive shell has it
+    set to /run/user/<uid>. Falling back to /tmp would put the cron jobs on a
+    different socket path from the daemon started by the desktop session, and
+    they would never find each other — which is exactly the bug this replaces.
+    /tmp remains the last resort for a system with no per-user runtime dir.
+    """
+    base = os.environ.get("XDG_RUNTIME_DIR")
+    if base and os.path.isdir(base):
+        return base
+    guess = f"/run/user/{os.getuid()}"
+    return guess if os.path.isdir(guess) else "/tmp"
+
+
 def notifyd_socket():
-    base = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
-    return os.path.join(base, "uoa-notify", "notifyd.sock")
+    return os.path.join(runtime_base(), "uoa-notify", "notifyd.sock")
 
 
 def notifyd_request(payload, timeout=5):
