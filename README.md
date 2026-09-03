@@ -339,6 +339,7 @@ notify.py --renotify-unread --source eclass
 | `deadline-to-calendar.sh` | Manual deadline: Calendar, Trello and vault note in one command |
 | `unread-count.sh` | Status-bar widget output |
 | `uoa-credentials.sh` | Credential store management |
+| `uoa-notify-ctl.sh` | One switch: pause or resume every scheduled job and the daemon |
 
 ---
 
@@ -359,6 +360,31 @@ Installed by `./install.sh --cron` from `examples/crontab.example`.
 Sync runs first on each quarter hour so the checkers that follow re-notify
 only what is genuinely still unread.
 
+Cron is the only supported scheduler. If an earlier install left systemd user
+timers behind, they fire the same checkers independently: two copies race for
+the same mailbox and the same lock, one loses, and the loser shows up as a
+process that went nowhere. `uoa-notify-ctl.sh status` reports them and `stop`
+disables them.
+
+---
+
+## Control
+
+```bash
+uoa-notify-ctl.sh status    # what is scheduled, what is running, what failed
+uoa-notify-ctl.sh stop      # pause every job, stop the daemon, disable stray timers
+uoa-notify-ctl.sh start     # resume
+```
+
+Pausing rewrites the crontab in place, prefixing each job with `#DISABLED `,
+and backs the previous table up to `~/.local/state/crontab.uoa-notify.bak`.
+Nothing is deleted, so `start` is exactly reversible.
+
+Pausing stops new notifications and new calendar events. It does not remove
+what has already been created: events already on the calendar stay there, and
+the ledgers keep their `calendar_event_created` flags, so a later `start` does
+not recreate anything it created before.
+
 ---
 
 ## Development
@@ -367,7 +393,7 @@ only what is genuinely still unread.
 python3 -m unittest discover -s tests -t tests
 ```
 
-66 tests, no credentials, no network and no third-party packages. They cover
+72 tests, no credentials, no network and no third-party packages. They cover
 the Greek classifier, subject-tag generation, the configurable MCP backend,
 the notification daemon and the click-to-read chain. Continuous integration runs them on Python 3.8 and
 3.12 and parses every shell script.
