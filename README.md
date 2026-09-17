@@ -20,75 +20,61 @@ Version: 1.0.0
 ## Architecture
 
 ```
-  +------------+ +--------------+ +-----------+ +----------+ +--------------+
-  | mail.uoa.gr| | eclass.uoa.gr| | eudoxus.gr| | di.uoa.gr| | Gmail        |
-  | IMAP       | | CAS / SSO    | | Shibboleth| | page hash| | MCP connector|
-  +------------+ +--------------+ +-----------+ +----------+ +--------------+
-         |               |              |             |              |
-         v               v              v             v              v
-  +----------------------------------------------------------------+
-  |  CHECKERS - one per source, each with its own seen-set         |
-  |                                                                |
-  |  check-uoa-mail.py           every 15 min, offset by 5         |
-  |  check-eclass.py             twice an hour                     |
-  |  check-gmail-university.py   twice an hour                     |
-  |  check-eudoxus.py            every 2 hours                     |
-  |  check-department.py         every 2 hours                     |
-  +----------------------------------------------------------------+
-                                   |   new items only, never re-announced
-                                   v
-  +----------------------------------------------------------------+
-  |  uoa_common.py - shared core                                   |
-  |                                                                |
-  |  Greek parser    normalise -> strip noise -> match keyword     |
-  |                  -> date near keyword -> urgency bucket        |
-  |  Ledger          per-source JSON: notified / forwarded / read  |
-  |                  gmail_msg_id / calendar_created               |
-  |  Credentials     keyring -> keepass -> gpg -> file             |
-  |  MCP bridge      configured CLI, explicit tool allow-list      |
-  +----------------------------------------------------------------+
-                                   |
-                                   v
-                         +-----------------------+
-                         |  notify.py            |
-                         |  one hub, every path  |
-                         +-----------------------+
-                                     |
-             +-----------------------+----------------------+
-             v                       v                      v
-  +--------------------+ +----------------------+ +-------------------+
-  |  uoa-notifyd.py    | |  forward once        | |  ~/.local/log/    |
-  |  desktop banner    | |  to the phone address| |  notifications.log|
-  |  click -> open page| |  [XXX-MSG-xxxxxxxx]  | |                   |
-  |  click -> mark read| |                      | |                   |
-  +--------------------+ +----------------------+ +-------------------+
-             |
-             v
-        +----------------------------------------+
-        |  Gmail                                 |
-        |  UNREAD label                          |
-        |                                        |
-        |  the source of truth for read/unread,  |
-        |  whichever device did the reading      |
-        +----------------------------------------+
-                             |
-                             v
-        +--------------------------------------------+
-        |  sync-read-status.py                       |
-        |  every 15 min, on the quarter hour         |
-        |                                            |
-        |  Gmail verdict -> ledger -> re-notify only |
-        |  what is genuinely still unread            |
-        +--------------------------------------------+
-                               |
-                               +--> re-notify goes back through notify.py
+  ┌────────────┐ ┌──────────────┐ ┌───────────┐ ┌──────────┐ ┌──────────────┐
+  │ mail.uoa.gr│ │ eclass.uoa.gr│ │ eudoxus.gr│ │ di.uoa.gr│ │ Gmail        │
+  │ IMAP       │ │ CAS / SSO    │ │ Shibboleth│ │ page hash│ │ MCP connector│
+  └──────┬─────┘ └───────┬──────┘ └─────┬─────┘ └─────┬────┘ └───────┬──────┘
+         │               │              │             │              │
+  ┌──────┴───────────────┴──────────────┴─────────────┴──────────────┴─────┐
+  │  CHECKERS - one per source, each with its own seen-set                 │
+  │                                                                        │
+  │  check-uoa-mail.py           every 15 min, offset by 5                 │
+  │  check-eclass.py             twice an hour                             │
+  │  check-gmail-university.py   twice an hour                             │
+  │  check-eudoxus.py            every 2 hours                             │
+  │  check-department.py         every 2 hours                             │
+  └────────────────────────────────────┬───────────────────────────────────┘
+                                       │   new items only, never re-announced
+  ┌────────────────────────────────────┴───────────────────────────────────┐
+  │  uoa_common.py - shared core                                           │
+  │                                                                        │
+  │  Greek parser    normalise → strip noise → match keyword               │
+  │                  → date near keyword → urgency bucket                  │
+  │  Ledger          per-source JSON: notified / forwarded / read          │
+  │                  gmail_msg_id / calendar_created                       │
+  │  Credentials     keyring → keepass → gpg → file                        │
+  │  MCP bridge      configured CLI, explicit tool allow-list              │
+  └────────────────────────────────────┬───────────────────────────────────┘
+                          ┌───────────┴───────────┐
+                          │  notify.py            │
+                          │  one hub, every path  │
+                          └───────────┬───────────┘
+             ┌────────────────────────┼────────────────────────┐
+  ┌──────────┴──────────┐ ┌───────────┴───────────┐ ┌──────────┴─────────┐
+  │  uoa-notifyd.py     │ │  forward once         │ │  ~/.local/log/     │
+  │  desktop banner     │ │  to the phone address │ │  notifications.log │
+  │  click → open page  │ │  [XXX-MSG-xxxxxxxx]   │ │                    │
+  │  click → mark read  │ │                       │ │                    │
+  └──────────┬──────────┘ └───────────────────────┘ └────────────────────┘
+  ┌──────────┴───────────────────────────────┐
+  │  Gmail - UNREAD label                    │
+  │                                          │
+  │  the source of truth for read/unread,    │
+  │  whichever device did the reading        │
+  └──────────┬───────────────────────────────┘
+  ┌──────────┴───────────────────────────────────────────────┐
+  │  sync-read-status.py   every 15 min, on the quarter hour │
+  │                                                          │
+  │  Gmail verdict → ledger → re-notify only what is         │
+  │  genuinely still unread, back through notify.py          │
+  └──────────────────────────────────────────────────────────┘
 
   Side effects, all deduplicated through the ledger:
-  +-----------------+ +------------------+ +---------------+ +------------+
-  |  Google Calendar| |  Obsidian vault  | |  Google Drive | |  Trello    |
-  |  deadline event,| |  attachment filed| |  University/  | |  card per  |
-  |  3-day + 1-day  | |  with a note     | |  <sender>/    | |  deadline  |
-  +-----------------+ +------------------+ +---------------+ +------------+
+  ┌──────────────────┐ ┌──────────────────┐ ┌────────────────┐ ┌────────────┐
+  │  Google Calendar │ │  Obsidian vault  │ │  Google Drive  │ │  Trello    │
+  │  deadline event, │ │  attachment filed│ │  University/   │ │  card per  │
+  │  3-day + 1-day   │ │  with a note     │ │  <sender>/     │ │  deadline  │
+  └──────────────────┘ └──────────────────┘ └────────────────┘ └────────────┘
 ```
 
 ---
