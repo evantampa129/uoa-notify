@@ -1,278 +1,186 @@
-# UoA Notify
+# uoa-notify
 
-**Cross-device academic notification system for the University of Athens**
+Notifications for University of Athens coursework, on every device, with one
+read state.
 
-UoA Notify watches every channel a Greek university student is expected to
-check by hand — the institutional mailbox, eClass, Eudoxus, the department
-site and university mail already sitting in Gmail — parses Greek deadline
-language out of what it finds, and delivers one notification per item with a
-single honest read state behind it. Read it on the phone and the laptop stops
-asking; read it on the laptop and the phone stops asking.
+As a student at DI/NKUA you are expected to check the webmail, eClass, Eudoxus
+and the department site by hand, several times a day, forever. This watches all
+of them for you. When something new shows up it works out whether there is a
+deadline in it (the announcements are in Greek, which is most of the difficulty),
+notifies you once, and puts the deadline on your calendar.
 
-Every deadline it recognises becomes a calendar event with reminders. Every
-attachment lands in the vault next to a note. Nothing is ever announced twice.
+The part I care about most: read it on your phone and your laptop stops asking.
+Read it on your laptop and your phone stops asking. Nothing gets announced twice.
 
-Author: Evangelos Tampachaniotis
-Version: 1.0.0
+## How it works
 
----
+Five checker scripts, one per source, each keeping its own set of things it has
+already seen:
 
-## Architecture
-
-```
-   mail.uoa.gr      eclass.uoa.gr    eudoxus.gr     di.uoa.gr      Gmail
-       IMAP          CAS / SSO       Shibboleth     page hash    MCP connector
-         |                |               |              |            |
-         v                v               v              v            v
-   +---------------------------------------------------------------------+
-   |  CHECKERS - one per source, each with its own seen-set              |
-   |                                                                     |
-   |  check-uoa-mail.py   check-eclass.py    check-eudoxus.py            |
-   |  check-department.py check-gmail-university.py                      |
-   +---------------------------------------------------------------------+
-                                  |
-                     new items only, never re-announced
-                                  v
-   +---------------------------------------------------------------------+
-   |  uoa_common.py - shared core                                        |
-   |                                                                     |
-   |   Greek deadline parser   normalise -> strip noise -> match keyword  |
-   |                           -> date near keyword -> urgency bucket     |
-   |   Ledger                  per-source JSON: notified / forwarded /    |
-   |                           read / gmail_msg_id / calendar_created     |
-   |   Credentials             keyring -> keepass -> gpg -> file          |
-   |   MCP bridge              configured CLI, explicit tool allow-list   |
-   +---------------------------------------------------------------------+
-                                  |
-                                  v
-                        +--------------------+
-                        |     notify.py      |  one hub, every path
-                        +--------------------+
-                          |       |        |
-            +-------------+       |        +-------------+
-            v                     v                      v
-     uoa-notifyd.py        forward once to        ~/.local/log/
-     desktop banner        the phone address      notifications.log
-     click -> open page    [XXX-MSG-xxxxxxxx]
-     click -> mark read           |
-            |                     v
-            |            +------------------+
-            +----------->|   Gmail          |  the source of truth
-                         |   UNREAD label   |  for read/unread
-                         +------------------+
-                                  |
-                                  v
-                        sync-read-status.py        every 15 minutes
-                        Gmail verdict -> ledger -> re-notify what is
-                                                   genuinely still unread
-
-   Side effects, all deduplicated:
-     Google Calendar    deadline event + 3-day and 1-day reminders
-     Obsidian vault     attachments filed with a companion note
-     Google Drive       University/<sender>/
-     Trello             card per deadline
-```
-
----
-
-## Features
-
-### Sources
-
-| Source | Access | What it watches |
+| Source | How it gets in | What it looks at |
 |---|---|---|
-| UoA webmail | IMAP over TLS, `mail.uoa.gr` | New mail, deadlines in the body, PDF and DOCX attachments |
-| eClass | CAS single sign-on | Announcements, assignments, files and grades, per course |
-| Eudoxus | Shibboleth/SAML, public JSON feed | Textbook declaration and distribution periods |
-| Department | Page-hash diffing of `di.uoa.gr` | Announcements, plus any extra URL in `~/.watch-urls` |
-| Gmail | MCP connector | University mail already delivered to Gmail |
+| UoA webmail | IMAP over TLS to `mail.uoa.gr` | New mail, deadlines in the body, PDF and DOCX attachments |
+| eClass | CAS single sign-on | Announcements, assignments, files, grades, per course |
+| Eudoxus | Shibboleth, plus the public JSON feed | Textbook declaration and distribution periods |
+| Department | Hashing the `di.uoa.gr` page and diffing | Announcements, plus anything you add to `~/.watch-urls` |
+| Gmail | MCP connector | University mail that already landed in Gmail |
 
-Each source keeps its own seen-set, so an announcement is announced once and
-never again — including across restarts, and including when the same item is
-edited upstream.
+They all call into `uoa_common.py`, which holds the Greek parser, the ledger, the
+credential lookup and the connector bridge. Everything then funnels through
+`notify.py`, which is the only thing that posts a notification, forwards a mail,
+writes the log or touches the ledger.
 
-### Greek deadline parsing
+### Parsing Greek deadlines
 
-Announcements are written in inflected Greek, so keywords are matched at a
-word start with no trailing boundary: `προθεσμία` still finds `προθεσμίας`,
-while `εργασία` cannot match inside `επεξεργασία`. Noise phrases such as
-`σταθμό εργασίας` (workstation) are blanked out before matching, whitespace-
-tolerantly, so a line-wrapped IT notice is not read as coursework.
+Greek is inflected, so you cannot match whole words. Keywords are matched at word
+start with no trailing boundary: `προθεσμία` has to find `προθεσμίας`, but
+`εργασία` must not match inside `επεξεργασία`. That second one shipped as a bug
+and there is now a test named after it.
 
-A date adjacent to a deadline word beats a bare date elsewhere in the message,
-which keeps a mail's own `Ημερομηνία:` header from becoming its due date.
-What survives is bucketed by how close it is: urgent within 3 days, this week
-within 7, otherwise informational.
+Noise phrases get blanked before matching, whitespace-tolerantly, because
+`σταθμό εργασίας` (workstation) in an IT notice was being read as coursework -
+and it was doing it across a hard line wrap, which took a while to see.
 
-### One read state across every device
+When there are several dates, one next to a deadline word beats a bare date
+elsewhere. Otherwise a mail's own `Ημερομηνία:` header becomes its due date,
+which is wrong every single time. Whatever survives gets bucketed: urgent inside
+3 days, this week inside 7, informational after that.
 
-Notifications are forwarded to the phone with a stable tag in the subject:
+### One read state
 
-    🟡 UoA DEADLINE: Εργασία 3 — Δομές Δεδομένων [UOA-MSG-3f8a1c9d]
+Every forwarded notification carries a tag in the subject:
 
-The tag is `sha1(source|message_id)` truncated to eight hex characters, and it
-is the only identifier that survives Gmail's threading, the subject-length
-clamp and any client rewriting the display. `sync-read-status.py` matches on
-it every 15 minutes and copies Gmail's verdict onto the local ledger, which is
-what makes reading on one device silence the other.
+    UoA DEADLINE: Εργασία 3, Δομές Δεδομένων [UOA-MSG-3f8a1c9d]
 
-Gmail marks incoming mail already-read when the sender is one of the account's
-own send-as aliases — which is exactly the case here, since notifications are
-forwarded from the `@uoa.gr` address to the Gmail address. Left alone, every
-notification would arrive pre-read and nothing would ever be notified. The
-first time sync links a freshly forwarded message it puts the `UNREAD` label
-back, within a 90-minute window so a mail genuinely already opened is never
-dragged back to unread.
+That is `sha1(source|message_id)` cut to eight hex characters. It is the only
+identifier that survives Gmail threading, the subject length clamp and clients
+rewriting the display. `sync-read-status.py` runs every 15 minutes, matches on the
+tag, and copies Gmail's read/unread verdict onto the local ledger. That is the
+whole trick - Gmail is the source of truth, and both devices are just reading it.
+
+There is one ugly detail. Gmail marks mail as already-read when the sender is one
+of the account's own send-as aliases, which is exactly what is happening here
+(`@uoa.gr` forwarding to the Gmail address). Left alone, every notification
+arrives pre-read and you are never told about anything. So the first time sync
+links a freshly forwarded message it puts the `UNREAD` label back, but only
+within a 90-minute window, so a mail you genuinely opened does not get dragged
+back to unread.
 
 ### Clickable notifications
 
-Activating a notification opens the source page and marks the item read, in
-that order and without the browser waiting on the network.
-
-Getting that to work took three fixes, because a notification is harder to
-make clickable than it looks.
+Clicking a notification opens the page and marks it read, in that order, without
+waiting on the network. Getting this to work took three attempts.
 
 Clicking the *body* of a notification fires the action registered under the
-reserved key `default` and nothing else, so a notification declaring only a
-named action looks clickable and does nothing at all. GNOME Shell compounds
-this by hiding named action buttons until the banner is expanded, so there is
-often nothing visible to click either.
+reserved key `default` and nothing else. So a notification with only a named
+action looks clickable and does absolutely nothing. GNOME makes this worse by
+hiding named action buttons until you expand the banner, so often there is
+nothing to click either.
 
-`notify-send --action` also implies `--wait`, and GNOME Shell ignores
-`--expire-time`, so the process blocks forever. Measured in practice: 97 live
-helper processes, the oldest fourteen hours old, each holding the per-item
-lock that then silenced its own item permanently.
+Then: `notify-send --action` implies `--wait`, and GNOME ignores `--expire-time`,
+so the process just blocks. I found 97 live helper processes, the oldest fourteen
+hours old, each one holding the per-item lock and therefore permanently silencing
+its own item.
 
-Bounding that wait fixes the leak and exposes the real problem. **A
-notification outlives the process that posted it.** GNOME keeps it in the tray
-after the helper exits, so the banner is still there, still looks clickable,
-and the connection that would have received the click is gone. That is why
-`uoa-notifyd.py` exists: `ActionInvoked` is broadcast on the session bus with
-the notification's own id, so one long-lived daemon subscribes once and stays
-reachable for every notification it has ever posted, however long ago.
+Bounding the wait fixes the leak and reveals the actual problem, which is that a
+notification outlives the process that posted it. GNOME keeps it in the tray after
+the helper exits, so the banner is still sitting there looking clickable while the
+connection that would receive the click is gone.
 
-    checker -> notify.py -> notifyd (unix socket) -> Notify()  ->  GNOME
-                                    ^                                |
-                                    +---------- ActionInvoked -------+
-                                    |
-                                    +-> xdg-open the page
-                                    +-> notify.py --mark-read (out of process)
+That is what `uoa-notifyd.py` is for. `ActionInvoked` is broadcast on the session
+bus with the notification's own id, so one long-lived daemon subscribes once and
+stays reachable for anything it has ever posted:
 
-The daemon starts on demand from the first notification of a cron cycle and
-exits after six idle hours, so there is no service file to manage. If it
-cannot start — no `python3-gi` — the older `notify-open.sh` helper is used
-instead, and a plain notification after that. The click degrades; the alert
-never does.
+    checker -> notify.py -> notifyd (unix socket) -> Notify() -> GNOME
+                                  ^                               |
+                                  +-------- ActionInvoked --------+
+                                  |
+                                  +-> xdg-open the page
+                                  +-> notify.py --mark-read (out of process)
 
-### Deadlines become things you can act on
+It starts on demand from the first notification of a cron cycle and exits after
+six idle hours, so there is no service file to look after. If it cannot start (no
+`python3-gi`) it falls back to `notify-open.sh`, and then to a plain notification.
+The click degrades, the alert does not.
 
-| Destination | What is created | Deduplicated by |
-|---|---|---|
-| Google Calendar | Deadline event plus 3-day and 1-day reminder events | `calendar_created` in the ledger |
-| Obsidian vault | Attachment filed under `Coursework/UoA Inbox` with a companion note | Path already present |
-| Google Drive | Attachment under `University/<sender>/` | Existing file search |
-| Trello | One card per deadline, with the due date set | Card search before create |
+### What happens to a deadline
+
+Everything below is deduplicated, so re-running a checker does not create
+anything twice:
+
+- Google Calendar gets the deadline plus 3-day and 1-day reminders
+- Attachments get filed in the Obsidian vault under `Coursework/UoA Inbox` with a
+  note next to them
+- A copy goes to Google Drive under `University/<sender>/`
+- Trello gets a card with the due date
 
 ### Briefs
 
-`morning-brief.sh` at 07:30 leads with what is still unread, then urgent
-deadlines, then the week. `weekly-review.sh` on Sunday evening reports
-read-versus-unread by source and looks three weeks ahead. `daily-log.sh`
-writes the day into the vault at 22:00. `unread-count.sh` prints a status-bar
-count for polybar, waybar or i3status without touching the network.
+`morning-brief.sh` runs at 07:30 and leads with what is still unread, then urgent
+deadlines, then the rest of the week. `weekly-review.sh` on Sunday evening breaks
+down read vs unread by source and looks three weeks out. `daily-log.sh` writes the
+day into the vault at 22:00. `unread-count.sh` prints a count for polybar, waybar
+or i3status without hitting the network.
 
----
+## Setup
 
-## Tech Stack
+You need Linux with a desktop session for the banners (the checkers themselves
+run fine headless), Python 3.8+, `requests` and `beautifulsoup4`, `notify-send`
+and `xdg-open`, and a UoA account - the same one gets you webmail and eClass.
 
-| Layer | Technology |
-|---|---|
-| Language | Python 3.8+, Bash |
-| Mail | `imaplib`, `smtplib`, `email` (standard library) |
-| Scraping | requests 2.x, beautifulsoup4 4.x |
-| Desktop | `notify-send` (libnotify), `xdg-open`, zenity fallback |
-| Credentials | KeePassXC (KDBX4), libsecret, GPG, or mode-600 files |
-| Connectors | Gmail, Google Calendar, Google Drive and Trello over MCP |
-| Scheduling | cron |
-| Tests | `unittest` (standard library), GitHub Actions on 3.8 and 3.12 |
-
-`uoa_common.py` imports only the standard library at module level; requests
-and beautifulsoup4 are imported lazily by the scrapers that need them.
-
----
-
-## Requirements
-
-- Linux with a desktop session for notifications; the checkers themselves run
-  headless
-- Python 3.8 or newer
-- `requests` and `beautifulsoup4`
-- `notify-send`, `xdg-open`; `zenity` optional as a fallback
-- `python3-gi` for clickable notifications; without it clicks are unreliable
-- A UoA account, used for webmail and eClass alike
-- Optional: `keepassxc-cli` for encrypted credential storage
-- Optional: an assistant CLI on `PATH` for the Gmail, Calendar, Drive and
-  Trello connectors. Without one, everything local still works and those
-  steps are skipped.
-
----
-
-## Installation
+`python3-gi` is optional but you want it, otherwise clicks are unreliable.
+`zenity` is an optional fallback. `keepassxc-cli` is optional, for encrypted
+credentials. An assistant CLI on `PATH` is optional too; without one, the Gmail,
+Calendar, Drive and Trello steps are skipped and everything local still works.
 
 ```bash
 git clone git@github.com:evantampa129/uoa-notify.git
 cd uoa-notify
-
 pip install -r requirements.txt
 
-./install.sh              # copy to ~/bin, create directories, seed config
-./install.sh --cron       # the above, then install the crontab
-./install.sh --check      # verify an existing install, change nothing
-./install.sh --uninstall  # remove the crontab and the installed scripts
+./install.sh              # copy to ~/bin, make directories, seed config
+./install.sh --cron       # the same, then install the crontab
+./install.sh --check      # check an existing install, change nothing
+./install.sh --uninstall  # remove the crontab and the scripts
 ```
 
-`install.sh` never overwrites an existing config or existing credentials.
-
----
-
-## Configuration
+`install.sh` will not overwrite a config or credentials you already have.
 
 ### Credentials
 
-Credentials live in `~/.local/share/uoa-notify/credentials`, a directory
-created mode 700 so that neither the secrets nor their names are readable by
-any other account.
+They live in `~/.local/share/uoa-notify/credentials`, a directory created mode
+700 so nobody else can read either the secrets or their names.
 
 ```bash
-./bin/uoa-credentials.sh store uoa-mail   # webmail + eClass, prompts silently
+./bin/uoa-credentials.sh store uoa-mail   # webmail and eClass, prompts silently
 ./bin/uoa-credentials.sh store eudoxus    # optional
-./bin/uoa-credentials.sh migrate          # move legacy dotfiles in and shred them
-./bin/uoa-credentials.sh status           # show where each secret lives
+./bin/uoa-credentials.sh migrate          # pull in legacy dotfiles and shred them
+./bin/uoa-credentials.sh status           # where each secret currently lives
 ```
 
-Four backends are tried in order, strongest first, and any of them may fail
-quietly so a locked store falls through rather than taking a cron cycle down:
+Four backends, tried strongest first. Any of them is allowed to fail quietly, so
+a locked store falls through instead of taking down a cron cycle:
 
-| Backend | Storage | Unattended |
+| Backend | Storage | Works unattended? |
 |---|---|---|
 | keyring | Login keyring via `secret-tool` | Yes, while the session keyring is unlocked |
-| keepass | KDBX4 database, AES-256 + Argon2, via `keepassxc-cli` | Yes, unlocked by a key file rather than a passphrase |
-| gpg | GPG-encrypted file, decrypted by `gpg-agent` | Only while the agent holds the passphrase |
+| keepass | KDBX4, AES-256 + Argon2, via `keepassxc-cli` | Yes, if unlocked by a key file rather than a passphrase |
+| gpg | GPG-encrypted file via `gpg-agent` | Only while the agent still holds the passphrase |
 | file | Plain file, mode 600 | Yes |
 
-The legacy `~/.uoa-mail-creds` and `~/.eudoxus-creds` are still read when
-nothing is stored, so an existing install keeps working untouched.
+The old `~/.uoa-mail-creds` and `~/.eudoxus-creds` are still read if nothing is
+stored, so an existing install keeps working.
 
-Worth stating plainly, because encryption invites the wrong assumption:
-whatever an unattended cron job can decrypt with nobody present, an attacker
-who already controls the account can decrypt too. The protection is against
-the realistic accidents — a dotfile swept into a backup, a synchronised home
-directory, an accidental commit, a `chmod` that widens the mode.
+Worth saying plainly, because encryption invites the wrong assumption: whatever an
+unattended cron job can decrypt with nobody present, an attacker who already owns
+the account can decrypt too. What this actually protects against is the boring
+stuff - a dotfile swept into a backup, a synced home directory, an accidental
+commit, a `chmod` that went too wide.
 
-### Settings
+### Config
 
-`~/.config/check-uoa-mail/config.ini`, seeded from
-`examples/config.ini.example`. Only `[notify] recipient` is required.
+`~/.config/check-uoa-mail/config.ini`, seeded from `examples/config.ini.example`.
+Only `[notify] recipient` is required.
 
 ```ini
 [notify]
@@ -284,108 +192,97 @@ week_days   = 7
 
 [agent]
 cli        =                   ; assistant CLI on PATH, for the connectors
-mcp_prefix =                   ; prefix its connector tool ids share
+mcp_prefix =                   ; the prefix its connector tool ids share
 ```
 
-`[agent]` is blank in the repository: no vendor is baked into the source, and
-the backend can be swapped without touching a script. Leave it blank and the
-MCP-backed steps are skipped while everything local keeps working. It can
-also be supplied as `UOA_AGENT_CLI` and `UOA_MCP_PREFIX`.
+`[agent]` is deliberately blank in the repo. No vendor is baked into the source
+and the backend can be swapped without editing a script. Leave it empty and the
+connector steps are skipped. `UOA_AGENT_CLI` and `UOA_MCP_PREFIX` work too.
 
----
+## Using it
 
-## Usage
-
-Every checker takes the same three flags.
+Every checker takes the same three flags:
 
 ```bash
 check-uoa-mail.py              # report what it finds, change nothing
-check-uoa-mail.py --notify     # notify, forward and record (what cron runs)
-check-uoa-mail.py --dry-run    # rehearse everything, leave no trace
+check-uoa-mail.py --notify     # notify, forward, record. this is what cron runs
+check-uoa-mail.py --dry-run    # rehearse the whole thing, leave no trace
 ```
 
 ```bash
-sync-read-status.py --json     # per-source unread counts
-unread-count.sh --waybar       # status-bar JSON
+sync-read-status.py --json     # unread counts per source
+unread-count.sh --waybar       # JSON for a status bar
 unread-count.sh --by-source    # one line per source
 
-morning-brief.sh               # the 07:30 brief, on demand
+morning-brief.sh               # the 07:30 brief, now
 deadline-to-calendar.sh --title "Εργασία 3" --date 2026-09-15 \
                         --course "Δομές Δεδομένων"
 
-uoa-credentials.sh status      # where each secret lives
+uoa-credentials.sh status
 notify.py --renotify-unread --source eclass
 ```
 
----
-
-## Scripts
+### Scripts
 
 | Script | What it does |
 |---|---|
-| `uoa_common.py` | Shared core: config, credentials, logging, SMTP, Greek parsing, ledger, MCP bridge |
-| `notify.py` | Central hub. Desktop notification, forward, log, ledger, read-back |
-| `uoa-notifyd.py` | Notification daemon. Keeps every notification clickable, opens the page and records the read |
-| `notify-open.sh` | Fallback notification helper, used when the daemon cannot run |
-| `check-uoa-mail.py` | UoA IMAP mailbox |
-| `check-eclass.py` | eClass announcements, assignments, files and grades |
-| `check-eudoxus.py` | Textbook periods and deadlines |
+| `uoa_common.py` | The shared core: config, credentials, logging, SMTP, Greek parsing, ledger, connector bridge |
+| `uoa-lib.sh` | The same idea for the shell scripts |
+| `notify.py` | The hub. Desktop notification, forward, log, ledger, read-back |
+| `uoa-notifyd.py` | The daemon that keeps notifications clickable |
+| `notify-open.sh` | Fallback helper for when the daemon cannot run |
+| `uoa-sendmail.py` | SMTP send, used for forwarding |
+| `check-uoa-mail.py` | The UoA IMAP mailbox |
+| `check-eclass.py` | eClass announcements, assignments, files, grades |
+| `check-eudoxus.py` | Textbook periods |
 | `check-department.py` | `di.uoa.gr` change detection |
 | `check-gmail-university.py` | University mail already in Gmail |
-| `sync-read-status.py` | Cross-device read synchronisation |
+| `sync-read-status.py` | Cross-device read sync |
 | `morning-brief.sh` | Daily brief, unread first |
-| `weekly-review.sh` | Weekly summary and three-week horizon |
-| `daily-log.sh` | Writes the day into the Obsidian vault |
-| `deadline-to-calendar.sh` | Manual deadline: Calendar, Trello and vault note in one command |
-| `unread-count.sh` | Status-bar widget output |
+| `weekly-review.sh` | Weekly summary, three weeks ahead |
+| `daily-log.sh` | Writes the day into the vault |
+| `deadline-to-calendar.sh` | Add a deadline by hand: calendar, Trello and note in one go |
+| `unread-count.sh` | Status bar output |
 | `uoa-credentials.sh` | Credential store management |
-| `uoa-notify-ctl.sh` | One switch: pause or resume every scheduled job and the daemon |
+| `uoa-notify-ctl.sh` | One switch for pausing and resuming everything |
 
----
-
-## Schedule
+### Schedule
 
 Installed by `./install.sh --cron` from `examples/crontab.example`.
 
-| When | Job |
+| When | What |
 |---|---|
-| Every 15 minutes, on the quarter hour | `sync-read-status.py` |
-| Every 15 minutes, offset by 5 | `check-uoa-mail.py` |
+| Every 15 min, on the quarter hour | `sync-read-status.py` |
+| Every 15 min, offset by 5 | `check-uoa-mail.py` |
 | Twice an hour | `check-eclass.py`, `check-gmail-university.py` |
 | Every 2 hours | `check-eudoxus.py`, `check-department.py` |
 | 07:30 daily | `morning-brief.sh` |
 | 22:00 daily | `daily-log.sh` |
 | Sunday 18:00 | `weekly-review.sh` |
 
-Sync runs first on each quarter hour so the checkers that follow re-notify
-only what is genuinely still unread.
+Sync goes first on the quarter hour so the checkers behind it only re-notify what
+is genuinely still unread.
 
-Cron is the only supported scheduler. If an earlier install left systemd user
-timers behind, they fire the same checkers independently: two copies race for
-the same mailbox and the same lock, one loses, and the loser shows up as a
-process that went nowhere. `uoa-notify-ctl.sh status` reports them and `stop`
-disables them.
+Cron is the only scheduler I support. If an old install left systemd user timers
+lying around, they fire the same checkers independently, two copies race for the
+same mailbox and the same lock, and the loser shows up as a process that did
+nothing. `uoa-notify-ctl.sh status` will point them out and `stop` disables them.
 
----
-
-## Control
+### Pausing everything
 
 ```bash
 uoa-notify-ctl.sh status    # what is scheduled, what is running, what failed
-uoa-notify-ctl.sh stop      # pause every job, stop the daemon, disable stray timers
-uoa-notify-ctl.sh start     # resume
+uoa-notify-ctl.sh stop      # pause every job, stop the daemon, kill stray timers
+uoa-notify-ctl.sh start     # put it back
 ```
 
-Pausing rewrites the crontab in place, prefixing each job with `#DISABLED `,
-and backs the previous table up to `~/.local/state/crontab.uoa-notify.bak`.
-Nothing is deleted, so `start` is exactly reversible.
+`stop` rewrites the crontab in place, prefixing each line with `#DISABLED `, and
+backs the old one up to `~/.local/state/crontab.uoa-notify.bak`. Nothing is
+deleted so `start` is exactly reversible.
 
-Pausing stops new notifications and new calendar events. It does not remove
-what has already been created: events already on the calendar stay there, and
-the ledgers keep their `calendar_event_created` flags, so a later `start` does
-not recreate anything it created before.
-
----
+It stops new notifications and new calendar events. It does not undo what already
+happened: existing events stay on the calendar and the ledger keeps its
+`calendar_event_created` flags, so starting again does not recreate them.
 
 ## Development
 
@@ -393,49 +290,48 @@ not recreate anything it created before.
 python3 -m unittest discover -s tests -t tests
 ```
 
-72 tests, no credentials, no network and no third-party packages. They cover
-the Greek classifier, subject-tag generation, the configurable MCP backend,
-the notification daemon and the click-to-read chain. Continuous integration runs them on Python 3.8 and
-3.12 and parses every shell script.
+72 tests. No credentials, no network, no third-party packages - they cover the
+Greek classifier, subject tag generation, the configurable connector backend, the
+daemon and the click-to-read chain. CI runs them on 3.8 and 3.12 and shellchecks
+every script.
 
-Two historical bugs are pinned by name, because both were silent: `εργασία`
-matching inside `επεξεργασία`, and the workstation noise phrase escaping
-across a hard line wrap. Test dates are computed relative to today so they do
-not rot.
+Two bugs are pinned by name because both of them were silent: `εργασία` matching
+inside `επεξεργασία`, and the workstation noise phrase getting through a hard
+line wrap. Test dates are computed relative to today so they do not rot.
 
-`docs/design.md` covers the parts that are not obvious from the code: why read
-state is shaped the way it is, the two feedback loops that had to be broken,
-and what the notification click actually has to do.
+`docs/design.md` covers the things that are not obvious from reading the code -
+why read state is shaped this way, the two feedback loops that had to be broken,
+and what a notification click actually has to do.
 
----
+`uoa_common.py` only imports the standard library at module level; `requests` and
+`beautifulsoup4` are imported lazily inside the scrapers that need them, which is
+why the tests need no dependencies.
 
-## Limitations
+## Things it does not do well
 
-- **Cross-source duplicate deadlines.** The same exam can arrive by email and
-  by eClass. Each source deduplicates itself, so two calendar events can
-  appear for one deadline under different titles. Deduplicating across sources
-  would need fuzzy title matching, which risks silently dropping genuinely
-  different deadlines that fall on the same day.
-- **Eudoxus** checks public pages unless credentials are stored.
-- **The morning brief takes two to four minutes**, because it runs every
-  checker and several connector queries. Fine at 07:30, slow by hand.
-- **Notifications need a desktop session.** The checkers run headless and
-  still forward, log and record; only the desktop banner is lost.
+- **The same deadline can arrive twice.** An exam announced by mail and on eClass
+  produces two calendar events under different titles, because each source only
+  deduplicates against itself. Matching across sources needs fuzzy title
+  comparison, and I would rather have a duplicate event than silently drop two
+  genuinely different deadlines that happen to fall on the same day.
+- **Eudoxus** only reads public pages unless you store credentials.
+- **The morning brief takes two to four minutes**, because it runs every checker
+  and several connector queries. Fine at 07:30, annoying by hand.
+- **Banners need a desktop session.** Headless still forwards, logs and records -
+  you just lose the popup.
 
----
+## Security notes
 
-## Security
+No credential, address or token is anywhere in the source. The recipient address
+and the assistant CLI are blank by default and come from local config or the
+environment. The credential directory is 700 and its contents 600, encrypted
+storage is preferred over plain files, and a warning is logged if a credential
+file turns out to be readable by anyone else. Migration overwrites the plaintext
+original before unlinking, and only after reading the encrypted copy back.
 
-- No credential, address or token appears anywhere in the source. The
-  recipient address and the assistant CLI are blank by default and read from
-  local configuration or the environment.
-- The credential directory is mode 700 and its contents mode 600, with
-  encrypted storage preferred over plain files and a warning logged whenever a
-  credential file is readable by anyone else.
-- Migration overwrites the plaintext original before unlinking it, and only
-  after the encrypted copy has been read back successfully.
-- Every connector call carries an explicit tool allow-list, so no connector is
-  ever reachable beyond what that step needs. The only write access granted to
-  Gmail is the label change that read synchronisation depends on.
-- `.gitignore` covers the credential files, the local config, the state
-  directory and the logs.
+Every connector call carries an explicit tool allow-list, so no connector is ever
+reachable beyond what that one step needs. The only write access Gmail is granted
+is the label change that read sync depends on.
+
+`.gitignore` covers the credential files, the local config, the state directory
+and the logs.
